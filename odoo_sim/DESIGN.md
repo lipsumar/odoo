@@ -12,15 +12,19 @@ obstacle is time.
 
 Requirements:
 
-1. The game runs on a **faster wall clock** than reality, and the rate can be
-   changed at runtime (sped up, slowed down, paused).
+1. The game runs on an **accelerated wall clock** — a fixed multiplier `K`
+   over real time, chosen once when the world is created.
 2. Odoo must follow that clock. A manufacturing order created during the game
    must carry the **game** timestamp, not the real one. Every business-level
    "now" resolves to game time.
 3. Odoo's **infrastructure** scheduling stays on real time. We do not want to
    destabilise worker lifetimes, HTTP timeouts, or connection management.
-4. Because game time can run very fast, we want deterministic control over
-   when cron jobs fire, rather than relying on a background poller.
+4. Because game time runs fast, we want deterministic control over when cron
+   jobs fire, rather than relying on a background poller.
+
+**Explicitly out of scope for v1:** changing the rate at runtime (speeding up,
+slowing down, pausing). See §3.1 — this buys a large simplification and can be
+added later without invalidating the design.
 
 ## 2. Findings from the 19.0 source
 
@@ -53,8 +57,8 @@ This matters: PostgreSQL implicitly searches `pg_catalog` *first* unless it is
 named explicitly in `search_path`. Without that `SET`, a `public.now()` would
 never be reached. Odoo uses this in its own CI together with `libfaketime`.
 
-**This is the mechanism we want.** The only thing missing is a rate: theirs is
-a fixed offset.
+**This is the mechanism we want.** Theirs is a pure offset; ours needs a
+multiplier as well.
 
 ### 2.2 `create_date` / `write_date` have no SQL defaults
 
@@ -107,9 +111,9 @@ Two exceptions, both benign:
   used purely as a randomness source for access tokens.
 - `odoo/addons/base/models/res_users.py:1542` — `res_users_apikeys.create_date`
   is created with a DDL-level `DEFAULT (now() at time zone 'utc')`. **Column
-  DEFAULT expressions resolve the function OID at DDL time**, so a table
-  created before our override installs will stay bound to `pg_catalog.now()`.
-  Acceptable (API keys are infrastructure, not gameplay), but noted.
+  DEFAULT expressions resolve the function OID at DDL time**, so this table
+  stays bound to `pg_catalog.now()`. **Decided: leave as is** — API keys are
+  infrastructure, not gameplay.
 
 Raw SQL `now()` *does* appear in reports and gc queries — e.g.
 `addons/im_livechat/models/discuss_channel.py:521`,
@@ -119,54 +123,67 @@ correctly by the override and will follow game time, which is what we want.
 ### 2.5 Raw Python `datetime.now()` remains
 
 ~357 `datetime.now(`, ~222 `date.today()`, ~36 `utcnow()`, ~101 `time.time()`
-across `addons/`. These bypass the field helpers entirely. See §5.
+across `addons/`. These bypass the field helpers entirely. See §5.4.
 
 ## 3. The clock
 
-A game clock is three values, not one:
+Three constants, fixed for the lifetime of the world:
+
+| Constant | Meaning |
+|---|---|
+| `anchor_real` | real UTC instant at which the world was created |
+| `anchor_game` | game UTC instant corresponding to `anchor_real` |
+| `K` | game seconds per real second (e.g. `60`) |
 
 ```
-game_now = anchor_game + (real_now - anchor_real) * rate
+game_now = anchor_game + (real_now - anchor_real) * K
 ```
 
-Changing speed means **re-anchoring**, never recomputing history:
+The game world is set in the **present or near future**, so `anchor_game` is
+`anchor_real` or slightly ahead of it. This keeps fiscal years, sequences, and
+demo data in a plausible range and avoids needing a distinct game epoch.
 
-```
-anchor_game := game_now()
-anchor_real := real_now()
-rate        := new_rate
-```
+### 3.1 Why fixing the rate simplifies so much
 
-This keeps the clock continuous across rate changes. Pause is `rate = 0`.
+A changeable rate would require re-anchoring on every change, a mutable clock
+row read by both Python and PostgreSQL, cross-worker invalidation of that row,
+and explicit handling of `rate = 0` (paused) where timestamps tie. Making `K`
+immutable removes all of it:
 
-### Invariant: the clock is monotonic non-decreasing
+- **Monotonicity is free.** With `K > 0` and `pg_catalog.now()` advancing, game
+  time cannot move backwards. No guard needed, and `write_date` ordering and
+  optimistic concurrency checks are safe by construction.
+- **No table read per call.** The constants are inlined into the SQL function.
+- **No cross-worker sync.** Immutable values cannot drift between processes.
+- **No cache invalidation.** Python reads the constants once per process and
+  caches them forever.
 
-Never let game time move backwards. `write_date` ordering, optimistic
-concurrency checks, and cron `nextcall` arithmetic all assume forward motion.
-Rate changes as defined above are safe by construction; manual clock jumps
-must be forward-only or the world needs a full reset.
+Adding a variable rate later means reintroducing the anchor/rate row and
+re-anchoring on change. Nothing in this design blocks that.
 
-With `rate = 0`, many operations produce identical timestamps. Where strict
-ordering matters, either forbid writes while paused or advance by a small
-epsilon per transaction.
+### 3.2 Storage
 
-### Storage
-
-One row, so PostgreSQL and Python read the same source of truth:
+The authoritative values live in a one-row table, written once at world
+creation:
 
 ```sql
 CREATE TABLE game_clock (
     id          boolean PRIMARY KEY DEFAULT true CHECK (id),
     anchor_real timestamptz NOT NULL,
     anchor_game timestamptz NOT NULL,
-    rate        double precision NOT NULL DEFAULT 1.0
+    rate        double precision NOT NULL
 );
 ```
 
-Because both the SQL function and the Python helper read this row, multiple
-workers agree automatically — no cross-process clock sync protocol needed.
-Python may cache the row briefly; invalidate on write via the existing
-registry signaling or a dedicated `NOTIFY` channel.
+This row is the source used to (a) generate the SQL function with the values
+inlined, and (b) seed the Python-side constants at process start via a raw SQL
+read (avoiding any dependency on the ORM during low-level `cr.now()`).
+
+**The row is immutable.** Editing it does not take effect until the SQL
+function is regenerated and workers are restarted. That awkwardness is
+deliberate — it is not a runtime control surface.
+
+One world per database. Multiple worlds means multiple databases.
 
 ## 4. Design
 
@@ -174,16 +191,18 @@ registry signaling or a dedicated `NOTIFY` channel.
 
 ```sql
 CREATE OR REPLACE FUNCTION public.now() RETURNS timestamptz AS $$
-    SELECT c.anchor_game + (pg_catalog.now() - c.anchor_real) * c.rate
-    FROM game_clock c;
+    SELECT TIMESTAMPTZ '<anchor_game>'
+         + (pg_catalog.now() - TIMESTAMPTZ '<anchor_real>') * <K>;
 $$ LANGUAGE sql STABLE;
 ```
 
 Notes:
 
+- Constants are inlined at world creation. No table lookup per call.
 - Use `pg_catalog.now()` (transaction start time), **not** `clock_timestamp()`.
   This preserves Odoo's documented "transaction's timestamp" semantics and
   keeps the function honestly `STABLE`.
+- `STABLE`, not `IMMUTABLE` — it depends on `pg_catalog.now()`.
 - `interval * double precision` and `timestamptz + interval` are both valid.
 - The override is **per database**. The `postgres` database that the cron
   runner connects to for `cron_database_list()` is untouched.
@@ -231,7 +250,7 @@ All cron date logic already flows through the two hooks above:
 So with the clock in place, crons become due on game time **for free**.
 
 What is genuinely broken is polling granularity. `odoo/service/server.py:68`
-sets `SLEEP_INTERVAL = 60` real seconds. At 100x that is 1.7 game hours of
+sets `SLEEP_INTERVAL = 60` real seconds. At `K = 100` that is 1.7 game hours of
 scheduling latency.
 
 **Approach:** run with `--max-cron-threads=0` to disable the built-in poller,
@@ -244,9 +263,9 @@ from odoo.addons.base.models.ir_cron import IrCron
 IrCron._process_jobs(db_name)
 ```
 
-This gives deterministic ordering, pausability, and a single place to reason
-about game progression — while still reusing Odoo's scheduling arithmetic
-instead of reimplementing it. It also keeps the diff against upstream small.
+This gives deterministic ordering and a single place to reason about game
+progression — while still reusing Odoo's scheduling arithmetic instead of
+reimplementing it. It also keeps the diff against upstream small.
 
 `_process_jobs` collects all ready jobs and runs each once per call
 (`ir_cron.py:187-215`), which is exactly the tick semantics we want.
@@ -272,18 +291,20 @@ while nextcall <= now:
     nextcall += interval
 ```
 
-At 1000x, a daily job fires once per ~86 real seconds rather than replaying 30
-skipped runs. This is usually the desired game behaviour (no catch-up storm),
+A daily job fires once per `86400 / K` real seconds rather than replaying every
+skipped run. This is usually the desired game behaviour (no catch-up storm),
 but it changes semantics: any cron written as *"runs daily, processes the last
 24 hours"* will see a much wider window and may drop or double-count records.
 
-**Action:** audit every gameplay-relevant cron for window assumptions.
+**Action:** audit every gameplay-relevant cron for window assumptions. This
+risk scales with `K` and does not go away with a fixed rate.
 
 ### 5.3 Cron auto-deactivation fires quickly
 
 `MIN_DELTA_BEFORE_DEACTIVATION = timedelta(days=7)` (`ir_cron.py:37`) is now
-measured in game time. At 1000x that is roughly 10 real minutes before a
-flaky cron is disabled. Consider making this threshold real-time.
+measured in game time — real-world `604800 / K` seconds. At `K = 1000` that is
+roughly 10 real minutes before a flaky cron is disabled. Consider making this
+threshold real-time.
 
 ### 5.4 Raw `datetime.now()` in addons
 
@@ -302,9 +323,9 @@ game, driven by observed behaviour rather than a blanket sweep.
 ## 6. Alternative considered: libfaketime
 
 `LD_PRELOAD`-ing libfaketime catches everything in Python, including all the
-raw `datetime.now()` calls, and supports rates (`FAKETIME="+0 x60"`, with
-`FAKETIME_TIMESTAMP_FILE` + `FAKETIME_NO_CACHE=1` for runtime changes). This is
-what Odoo's own `ODOO_FAKETIME_TEST_MODE` is built to pair with.
+raw `datetime.now()` calls, and supports a rate multiplier
+(`FAKETIME="+0 x60"`). This is what Odoo's own `ODOO_FAKETIME_TEST_MODE` is
+built to pair with.
 
 **Not chosen as the primary approach:**
 
@@ -319,8 +340,8 @@ proves too costly.
 
 ## 7. Implementation order
 
-1. `game_clock` table, `public.now()` function, and extend the `search_path`
-   hook in `odoo/sql_db.py` to sim-enabled databases.
+1. `game_clock` table, generated `public.now()` function, and extend the
+   `search_path` hook in `odoo/sql_db.py` to sim-enabled databases.
 2. Core edit in `odoo/orm/fields_temporal.py`; repoint `BaseCursor.now()`.
 3. Run with `--max-cron-threads=0`; drive `IrCron._process_jobs` from the game
    loop.
@@ -337,21 +358,24 @@ SQL-side override to model ours on.
 
 Worth building early:
 
-- A test that asserts `fields.Datetime.now()`, `cr.now()`, and SQL `now()`
-  agree to within a tolerance at several rates.
-- A test that the clock never moves backwards across a rate change.
-- A cron test at high rate verifying `nextcall` advances correctly and jobs
-  fire the expected number of times.
+- A test that `fields.Datetime.now()`, `cr.now()`, and SQL `now()` agree to
+  within a tolerance, at several values of `K`.
+- A test that game time advances by approximately `K` seconds per real second.
+- A cron test at high `K` verifying `nextcall` advances correctly and jobs fire
+  the expected number of times.
 
-## 9. Open questions
+## 9. Decisions
 
-- Should the clock be global to the database, or per-game-session (multiple
-  worlds in one instance)? Current design assumes one world per database.
-- How should long-running requests behave when the rate changes mid-request?
-  `cr.now()` is cached per transaction, so a transaction sees a consistent
-  instant — probably correct, needs confirmation against gameplay.
-- Do we need a "game epoch" distinct from real dates, or is the game world
-  simply set in the present/near future? Affects fiscal years, sequences, and
-  demo data.
-- Should `res_users_apikeys` (§2.4) be recreated post-override for
-  consistency, or explicitly left on real time?
+Resolved during design review:
+
+| Question | Decision |
+|---|---|
+| One world per database, or several? | **One world per database.** Multiple worlds means multiple databases. |
+| Runtime rate changes? | **No.** `K` is fixed at world creation. See §3.1. |
+| Distinct game epoch, or present-day? | **Present / near future.** `anchor_game ≈ anchor_real`. No separate epoch. |
+| `res_users_apikeys` DDL default (§2.4)? | **Leave as is**, bound to real time. Infrastructure, not gameplay. |
+
+Note that with rate changes gone, the question of a rate changing mid-request
+disappears. `cr.now()` remains cached per transaction (`odoo/sql_db.py:271`),
+so a transaction still observes a single consistent instant — which is the
+behaviour we want.
