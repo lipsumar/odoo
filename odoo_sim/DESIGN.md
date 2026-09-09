@@ -1,6 +1,6 @@
 # Odoo Sim — Game Clock Design
 
-Status: draft / exploratory
+Status: steps 1, 2 and 4 implemented; step 3 outstanding (see §7)
 Branch: `odoo-sim`
 Target: Odoo 19.0
 
@@ -84,6 +84,21 @@ The cache is cleared on commit and rollback (`odoo/sql_db.py:565,576`).
 
 **One hook covers the timestamps of every record in the system.**
 
+### 2.2.1 ...but the test cursor never queries the database
+
+`odoo/tests/test_cursor.py:129-133` — `TestCursor.now()` returns
+`datetime.now()` directly instead of issuing `SELECT now()`, and its
+`commit` / `rollback` (`test_cursor.py:95,106`) do not reset `_now` the way
+`Cursor` does (`sql_db.py:565,576`).
+
+So inside any `TransactionCase` the SQL override of §4.1 has **no effect at
+all** on `create_date` / `write_date`. `TestCursor.now()` has to be repointed
+alongside `BaseCursor.now()`, or every test passes for the wrong reason.
+
+This is also independent support for §4.2's choice to make the Python clock
+authoritative: doing so makes the real cursor and the test cursor agree by
+construction, rather than leaving them on two different clocks as upstream does.
+
 ### 2.3 The Python business-time surface is four functions
 
 All in `odoo/orm/fields_temporal.py`:
@@ -105,15 +120,20 @@ the user timezone; it needs no change.
 intercept. A full scan of `odoo/` and `addons/` found **zero** uses in business
 code.
 
-Two exceptions, both benign:
+Three exceptions, all benign:
 
 - `addons/website_slides/models/slide_channel.py:485` — `clock_timestamp()`
   used purely as a randomness source for access tokens.
 - `odoo/addons/base/models/res_users.py:1542` — `res_users_apikeys.create_date`
   is created with a DDL-level `DEFAULT (now() at time zone 'utc')`. **Column
   DEFAULT expressions resolve the function OID at DDL time**, so this table
-  stays bound to `pg_catalog.now()`. **Decided: leave as is** — API keys are
-  infrastructure, not gameplay.
+  stays bound to whichever `now()` was visible when it was created.
+  **Decided: leave as is** — API keys are infrastructure, not gameplay.
+- `odoo/addons/base/data/base_data.sql:82-83` — the same DDL-level default,
+  on the hand-written bootstrap tables. Harmless in practice: the ORM always
+  passes `create_date` and `write_date` explicitly from `cr.now()`
+  (`odoo/orm/models.py:4809-4811`), so the column default is only ever reached
+  by the raw SQL inserts that run during database initialisation.
 
 Raw SQL `now()` *does* appear in reports and gc queries — e.g.
 `addons/im_livechat/models/discuss_channel.py:521`,
@@ -183,6 +203,21 @@ read (avoiding any dependency on the ORM during low-level `cr.now()`).
 function is regenerated and workers are restarted. That awkwardness is
 deliberate — it is not a runtime control surface.
 
+Changing `K` *between* runs is supported, and is the escape hatch that makes a
+fixed rate liveable. Stop the server, re-anchor at the current game instant,
+restart:
+
+```bash
+GAME_NOW=$(psql -d <db> -qtAc "SET search_path=public,pg_catalog; SELECT now() AT TIME ZONE 'UTC';")
+odoo-bin sim_init -d <db> --rate <new> --game-start "$GAME_NOW" --force
+```
+
+Passing `--game-start` is not optional here. Without it `--force` re-anchors
+`anchor_game` to *real* now, which rewinds game time to the present and
+violates the monotonicity §3.1 relies on. **Known wart:** that should be the
+default behaviour of `--force` on an existing world, not something the operator
+has to remember.
+
 One world per database. Multiple worlds means multiple databases.
 
 ## 4. Design
@@ -207,9 +242,23 @@ Notes:
 - The override is **per database**. The `postgres` database that the cron
   runner connects to for `cron_database_list()` is untouched.
 
-Installation mirrors `_check_faketime_mode`: extend the `search_path` hook in
-`odoo/sql_db.py:376` to also trigger for sim-enabled databases, gated on our
-own flag rather than `ODOO_FAKETIME_TEST_MODE`.
+Installation is a CLI command rather than a hook in database creation, because
+a world is created on an existing, already-populated database:
+
+```
+odoo-bin sim_init -d <db> --rate 1440 [--game-start <iso>] [--force]
+```
+
+The `search_path` hook in `odoo/sql_db.py:376` is extended to sim databases, as
+for faketime. **Sim mode is detected from the database itself** — a database is
+a game world iff it has a populated `game_clock` table — rather than from an
+environment variable or a config flag. One fewer thing to keep in sync, and it
+makes the tests cheap. The result is cached per database per process; the row
+is immutable, so it never needs invalidating.
+
+Consequence worth remembering when testing: a server that was already running
+when `sim_init` ran has cached "not a game world" and keeps serving real time
+until it is restarted.
 
 ### 4.2 Python — edit core, do not monkeypatch
 
@@ -230,7 +279,8 @@ way. A core edit eliminates the ordering hazard entirely.
 
 Also repoint `BaseCursor.now()` (`odoo/sql_db.py:271`) at the same Python clock
 instead of issuing `SELECT now()`. Cheaper, and it guarantees the Python and
-SQL clocks cannot disagree.
+SQL clocks cannot disagree. `TestCursor.now()` (`odoo/tests/test_cursor.py:129`)
+must be repointed for the same reason — see §2.2.1.
 
 ### 4.3 Crons — keep Odoo's arithmetic, take over the trigger
 
@@ -250,8 +300,22 @@ All cron date logic already flows through the two hooks above:
 So with the clock in place, crons become due on game time **for free**.
 
 What is genuinely broken is polling granularity. `odoo/service/server.py:68`
-sets `SLEEP_INTERVAL = 60` real seconds. At `K = 100` that is 1.7 game hours of
-scheduling latency.
+sets `SLEEP_INTERVAL = 60` real seconds, so scheduling jitter is `60 * K` game
+seconds. Measured against a real server:
+
+| `K` | one game day takes | cron jitter | verdict |
+|---|---|---|---|
+| 60 | 24 real min | 1 game hour | fine |
+| 240 | 6 real min | 4 game hours | usable ceiling |
+| 1440 | 1 real min | 1 game day | interval crons meaningless |
+
+At `K = 1440` an hourly cron comes due every 2.5 real seconds but is polled once
+a minute, so all 24 occurrences of a game day collapse into a single run (§5.2).
+Event-driven crons (`_trigger`, which wakes the poller through `pg_notify`) are
+unaffected at any rate.
+
+**Until step 3 below is built, `K` above roughly 240 is not usable for anything
+that depends on interval crons.**
 
 **Approach:** run with `--max-cron-threads=0` to disable the built-in poller,
 and have the game loop call `IrCron._process_jobs(db_name)` directly on each
@@ -272,7 +336,7 @@ reimplementing it. It also keeps the diff against upstream small.
 
 ## 5. Known issues and risks
 
-### 5.1 `ir_cron.py:273` mixes clocks — hard bug
+### 5.1 `ir_cron.py:273` mixes clocks — hard bug, **fixed**
 
 ```python
 if datetime.now() - oldest < MAX_FAIL_TIME:
@@ -280,7 +344,16 @@ if datetime.now() - oldest < MAX_FAIL_TIME:
 
 `oldest` is derived from `nextcall` / `write_date`, which will be game time,
 while `datetime.now()` is real time. Subtracting them is meaningless once the
-clocks diverge. **Must patch.**
+clocks diverge: the delta goes negative, `BadModuleState` is raised
+unconditionally, and every cron on the database stops silently.
+
+Fixed by comparing against `cr.now()`, which is correct on real time too.
+
+Two more instances of the same defect turned up in the same file and were fixed
+with it — `_gc_cron_triggers` (`ir_cron.py:915`) and `_gc_cron_progress`
+(`ir_cron.py:936`) both compared real `datetime.now()` against the game-time
+columns `call_at` / `create_date`. Milder consequence: the garbage collectors
+would silently never delete anything rather than stalling cron.
 
 ### 5.2 Missed cron occurrences are collapsed
 
@@ -340,14 +413,25 @@ proves too costly.
 
 ## 7. Implementation order
 
-1. `game_clock` table, generated `public.now()` function, and extend the
-   `search_path` hook in `odoo/sql_db.py` to sim-enabled databases.
-2. Core edit in `odoo/orm/fields_temporal.py`; repoint `BaseCursor.now()`.
-3. Run with `--max-cron-threads=0`; drive `IrCron._process_jobs` from the game
-   loop.
-4. Fix `ir_cron.py:273`; reconsider `MIN_DELTA_BEFORE_DEACTIVATION`.
+1. **Done.** `game_clock` table, generated `public.now()` function, `sim_init`
+   CLI command, and the `search_path` hook in `odoo/sql_db.py` extended to sim
+   databases.
+2. **Done.** Core edits in `odoo/orm/fields_temporal.py`; `BaseCursor.now()`
+   and `TestCursor.now()` repointed at the clock.
+3. **Outstanding.** Run with `--max-cron-threads=0`; drive
+   `IrCron._process_jobs` from the game loop. This is what lifts the `K <= 240`
+   ceiling of §4.3, and is the obvious next piece of work.
+4. **Partly done.** `ir_cron.py:273` fixed, along with two more instances of the
+   same defect (§5.1). `MIN_DELTA_BEFORE_DEACTIVATION` not yet reconsidered
+   (§5.3).
 5. Audit gameplay crons for the batch-window issue (§5.2).
 6. Sweep raw `datetime.now()` per module as each domain enters the game.
+
+Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
+`install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
+`odoo/tests/test_cursor.py`, `odoo/orm/fields_temporal.py` and
+`odoo/addons/base/models/ir_cron.py` — 36 inserted lines across the five
+existing files.
 
 ## 8. Testing
 
@@ -356,13 +440,32 @@ wraps it with its own `freeze_time` class supporting test-class decoration.
 `ODOO_FAKETIME_TEST_MODE` provides a working reference implementation of the
 SQL-side override to model ours on.
 
-Worth building early:
+Built, in `odoo/addons/base/tests/test_game_clock.py` (14 tests, registered in
+`odoo/addons/base/tests/__init__.py`):
 
-- A test that `fields.Datetime.now()`, `cr.now()`, and SQL `now()` agree to
-  within a tolerance, at several values of `K`.
-- A test that game time advances by approximately `K` seconds per real second.
-- A cron test at high `K` verifying `nextcall` advances correctly and jobs fire
-  the expected number of times.
+```bash
+odoo-bin -d <db> --test-tags /base:TestGameClockMath,/base:TestGameClockDatabase,/base:TestGameClockCron --stop-after-init
+```
+
+- `TestGameClockMath` — the mapping itself under `freeze_time`, at
+  `K ∈ {0.5, 1, 60, 1000}`: the multiplier, anchor offsets, monotonicity, and
+  that a non-sim process is exactly real time.
+- `TestGameClockDatabase` — that the generated `public.now()` implements the
+  same formula as Python, that `create_date` / `write_date` carry game time,
+  and that both cursor classes read the clock.
+- `TestGameClockCron` — readiness on game time at `K = 3600`, and a regression
+  test for §5.1.
+
+Two things learned writing them:
+
+- The SQL and Python clocks must be compared **at the same real instant**, by
+  selecting `pg_catalog.now()` and `public.now()` in one query and feeding the
+  former to `GameClock.game_at()`. PostgreSQL's `now()` is the *transaction*
+  start time, and a `TransactionCase` transaction opens at `setUpClass`, so
+  letting each side read its own wall clock compares two different instants.
+- `freezegun` drives the real-time input of the clock, which is why
+  `GameClock.now()` reads `datetime.now()` and never `time.monotonic()`. It
+  cannot reach PostgreSQL, so the SQL agreement test must not run under it.
 
 ## 9. Decisions
 
@@ -374,6 +477,8 @@ Resolved during design review:
 | Runtime rate changes? | **No.** `K` is fixed at world creation. See §3.1. |
 | Distinct game epoch, or present-day? | **Present / near future.** `anchor_game ≈ anchor_real`. No separate epoch. |
 | `res_users_apikeys` DDL default (§2.4)? | **Leave as is**, bound to real time. Infrastructure, not gameplay. |
+| How is sim mode enabled? | **Detected from the database** — a populated `game_clock` table, cached per process. No env var, no config flag (§4.1). |
+| Which clock is authoritative for `cr.now()`? | **Python.** The SQL function stays, for raw SQL in business queries, but it no longer stamps records. Forced by §2.2.1: the test cursor never queries the database. |
 
 Note that with rate changes gone, the question of a rate changing mid-request
 disappears. `cr.now()` remains cached per transaction (`odoo/sql_db.py:271`),
