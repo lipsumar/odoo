@@ -9,6 +9,7 @@ from odoo.tools import DEFAULT_SERVER_DATE_FORMAT as DATE_FORMAT
 from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT as DATETIME_FORMAT
 from odoo.tools import SQL, date_utils
 
+from .. import game_clock
 from .fields import Field, _logger
 from .utils import parse_field_expr, READ_GROUP_NUMBER_GRANULARITY
 
@@ -114,7 +115,7 @@ class Date(BaseDate[date]):
 
         .. note:: This function may be used to compute default values.
         """
-        return date.today()
+        return game_clock.now().date()
 
     @staticmethod
     def context_today(record: BaseModel, timestamp: date | datetime | None = None) -> date:
@@ -128,7 +129,7 @@ class Date(BaseDate[date]):
             the current date and time (must be a datetime, regular dates
             can't be converted between timezones).
         """
-        today = timestamp or datetime.now()
+        today = timestamp or game_clock.now()
         tz = record.env.tz
         today_utc = pytz.utc.localize(today, is_dst=False)  # UTC = no DST
         today = today_utc.astimezone(tz)
@@ -200,7 +201,7 @@ class Datetime(BaseDate[datetime]):
         .. note:: This function may be used to compute default values.
         """
         # microseconds must be annihilated as they don't comply with the server datetime format
-        return datetime.now().replace(microsecond=0)
+        return game_clock.now().replace(microsecond=0)
 
     @staticmethod
     def today(*args) -> datetime:

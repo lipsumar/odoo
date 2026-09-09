@@ -30,7 +30,7 @@ from werkzeug import urls
 
 import odoo
 
-from . import tools
+from . import game_clock, tools
 from .release import MIN_PG_VERSION
 from .tools import config, SQL
 from .tools.func import frame_codeinfo, locked
@@ -271,10 +271,17 @@ class BaseCursor(_CursorProtocol):
     def now(self) -> datetime:
         """ Return the transaction's timestamp ``NOW() AT TIME ZONE 'UTC'``. """
         if self._now is None:
-            self.execute("SELECT (now() AT TIME ZONE 'UTC')")
-            row = self.fetchone()
-            assert row
-            self._now = row[0]
+            # On a game world the clock is authoritative in Python, so that the
+            # real cursor, the test cursor and the field helpers cannot
+            # disagree.  ``dbname`` lives on Cursor; TestCursor delegates to it.
+            clock = game_clock.clock_for(getattr(self, 'dbname', None))
+            if clock is not None:
+                self._now = clock.now()
+            else:
+                self.execute("SELECT (now() AT TIME ZONE 'UTC')")
+                row = self.fetchone()
+                assert row
+                self._now = row[0]
         return self._now
 
 
@@ -373,7 +380,12 @@ class Cursor(BaseCursor):
         self.connection.set_isolation_level(ISOLATION_LEVEL_REPEATABLE_READ)
         self.connection.set_session(readonly=pool.readonly)
 
-        if os.getenv('ODOO_FAKETIME_TEST_MODE') and self.dbname in tools.config['db_name']:
+        if (
+            (os.getenv('ODOO_FAKETIME_TEST_MODE') and self.dbname in tools.config['db_name'])
+            or game_clock.is_sim_database(self.dbname)
+        ):
+            # PostgreSQL searches pg_catalog first unless it is named
+            # explicitly, so without this a public.now() would never be reached.
             self.execute("SET search_path = public, pg_catalog;")
             self.commit()  # ensure that the search_path remains after a rollback
 

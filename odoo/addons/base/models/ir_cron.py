@@ -270,7 +270,12 @@ class IrCron(models.Model):
         # reset_module_state for an ongoing module installation process
         # right after installing a module with an old 'nextcall' cron in data
         oldest = min(max(job['nextcall'], job['write_date'] or job['nextcall']) for job in jobs)
-        if datetime.now() - oldest < MAX_FAIL_TIME:
+        # cr.now() and not datetime.now(): 'oldest' comes from nextcall /
+        # write_date, which are on the same clock as the cursor.  On a game
+        # world those run ahead of real time, and mixing the two makes this
+        # delta negative, which would raise BadModuleState forever and stop
+        # every cron on the database.
+        if cr.now() - oldest < MAX_FAIL_TIME:
             raise BadModuleState()
 
         # the cron execution failed around MAX_FAIL_TIME * 60 times (1 failure
@@ -907,7 +912,7 @@ class IrCronTrigger(models.Model):
     def _gc_cron_triggers(self):
         # active cron jobs are cleared by `_clear_schedule` when the job starts
         domain = [
-            ('call_at', '<', datetime.now() + relativedelta(weeks=-1)),
+            ('call_at', '<', self.env.cr.now() + relativedelta(weeks=-1)),
             ('cron_id.active', '=', False),
         ]
         records = self.search(domain, limit=GC_UNLINK_LIMIT)
@@ -928,6 +933,6 @@ class IrCronProgress(models.Model):
 
     @api.autovacuum
     def _gc_cron_progress(self):
-        records = self.search([('create_date', '<', datetime.now() - relativedelta(weeks=1))], limit=GC_UNLINK_LIMIT)
+        records = self.search([('create_date', '<', self.env.cr.now() - relativedelta(weeks=1))], limit=GC_UNLINK_LIMIT)
         records.unlink()
         return len(records), len(records) == GC_UNLINK_LIMIT  # done, remaining

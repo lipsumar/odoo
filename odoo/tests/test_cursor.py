@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import threading
 
+from odoo import game_clock
 from odoo.sql_db import BaseCursor, Cursor, Savepoint, _logger
 import odoo
 
@@ -129,5 +130,8 @@ class TestCursor(BaseCursor):
     def now(self) -> datetime:
         """ Return the transaction's timestamp ``datetime.now()``. """
         if self._now is None:
-            self._now = datetime.now()
+            # game_clock.now() falls back to datetime.now() outside a game
+            # world.  This cursor never queries the database for the time, so
+            # the SQL public.now() override alone would be invisible to tests.
+            self._now = game_clock.now()
         return self._now
