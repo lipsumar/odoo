@@ -393,6 +393,76 @@ game, driven by observed behaviour rather than a blanket sweep.
 - `limit_time_real`, HTTP timeouts, connection pooling — untouched.
 - Log timestamps — should remain real time for debuggability.
 
+### 5.6 The clock never stops
+
+Game time is derived from `pg_catalog.now()`, not from process uptime, so it
+advances whether or not a server is running. At `K = 1440` a lunch break is two
+game months and an overnight break is about 1.3 game years.
+
+On the next start, everything that came due in the meantime fires within one
+poll — collapsed to a single run each by §5.2, so it is a burst rather than a
+storm, but it is startling the first time.
+
+This makes §3.1's "no pause" decision materially more expensive than it reads
+on paper. The only lever available today is to re-anchor at the current game
+instant (§3.2) before resuming, which skips the jump at the cost of discarding
+the elapsed game time. A real pause is the `rate = 0` case that §3.1
+deliberately deferred, and it brings back the mutable-clock machinery and the
+timestamp-tie problem with it.
+
+**Worth deciding deliberately before the world holds anything valuable.**
+
+### 5.7 `_reschedule_later` replays every skipped interval — measured, benign
+
+The `while nextcall <= now` loop (`ir_cron.py:647`) performs one `relativedelta`
+addition and two timezone conversions per skipped interval, in-transaction. At
+a fast clock a long-idle cron can rack up a lot of them. Measured at roughly
+5 µs per iteration:
+
+| scenario | iterations | in-transaction |
+|---|---|---|
+| hourly cron, 1 game year behind | 8,761 | 0.04 s |
+| minutely cron, 1 game month behind | 43,201 | 0.21 s |
+| minutely cron, 1 game year behind | 525,601 | 2.6 s |
+
+So the worst realistic case is a few seconds, not the stall the loop looks like
+at first reading. **Not worth optimising** — recorded so the next person does
+not have to measure it again.
+
+### 5.8 `fields.Datetime.now()` cannot always resolve its database
+
+It is a static method with no cursor, so `game_clock.current_clock()` resolves
+the database from `threading.current_thread().dbname` — set by the HTTP
+dispatcher (`odoo/http.py:2280`), the RPC layer (`odoo/service/model.py:116`),
+the cron runner (`ir_cron.py:191`), `odoo-bin shell` and the server — and
+otherwise falls back to the single entry in `config['db_name']`.
+
+Where neither resolves — a bare thread, or a process pointed at several
+databases — it **silently returns real time**. Harmless under §9's one world
+per database with `-d <db>`, but it is the first thing that breaks if a sim
+process is ever given more than one database. `cr.now()` is unaffected: it has
+the cursor, and therefore the database.
+
+### 5.9 DDL defaults bind at CREATE TABLE time
+
+Verified on a live world: a table created while `search_path = public,
+pg_catalog` binds a `DEFAULT now()` to `public.now()` permanently — game time —
+whereas one created before the world existed stays on `pg_catalog.now()`.
+
+So the bootstrap tables of §2.4 keep real-time defaults, but any table created
+by a module installed *after* `sim_init` gets game-time defaults. Inconsistent,
+and inert in practice: the ORM declares no SQL default for `create_date` /
+`write_date` and always passes both explicitly. It matters only for raw SQL
+inserts into tables carrying a hand-written default.
+
+### 5.10 Per-cursor overhead on sim databases
+
+`SET search_path` plus its `commit()` runs on every `Cursor` construction
+against a game world, exactly as it does under faketime. The first cursor for a
+given database in a process additionally pays one `to_regclass` lookup to decide
+whether the database is a world at all. Both are negligible, noted for
+completeness.
+
 ## 6. Alternative considered: libfaketime
 
 `LD_PRELOAD`-ing libfaketime catches everything in Python, including all the
@@ -426,6 +496,15 @@ proves too costly.
    (§5.3).
 5. Audit gameplay crons for the batch-window issue (§5.2).
 6. Sweep raw `datetime.now()` per module as each domain enters the game.
+7. Decide what to do about the clock never stopping (§5.6). Either accept that
+   a world ages while unattended, or reopen the variable-rate design for a
+   `rate = 0` pause. **Decide before the world holds anything worth keeping.**
+8. Make `--force` re-anchor at the current *game* instant by default when a
+   world already exists (§3.2), instead of requiring `--game-start`.
+
+Ordered by what actually blocks play: 3 lifts the `K <= 240` ceiling, 7 decides
+whether a world can be left alone, 8 is a half-hour of ergonomics. 5 and 6 are
+driven by observed behaviour, not worth doing speculatively.
 
 Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
 `install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
