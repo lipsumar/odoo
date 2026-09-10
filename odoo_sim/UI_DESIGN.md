@@ -6,9 +6,8 @@ Target: Odoo 19.0
 Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 
 > **Revised.** The first draft recommended running the game inside the Odoo
-> HTTP server as an addon. Work on `DESIGN.md` §7 step 3 (triggering crons)
-> settled on a **separate process** for the game loop, and the UI backend rides
-> in it. §3 and §4 are rewritten accordingly.
+> HTTP server as an addon. The game loop is now a **separate process**, and the
+> UI backend rides in it. §3 and §4 are rewritten accordingly.
 >
 > The short version of what changed: the objection that ruled out a separate
 > service was *transactional*, and it applies to a service that reaches Odoo
@@ -16,6 +15,20 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > process that imports Odoo keeps every advantage of being an addon and adds
 > lifecycle isolation and a deterministic tick. It is a better answer than the
 > one this document originally gave.
+>
+> **State of the premise, and one thing to settle.** The separate-process
+> decision reached this document from the user directly. The parallel work on
+> `DESIGN.md` §7 step 3 had recommended it but still has an open question the
+> user has not answered there: *will the world ever run in prefork mode
+> (`--workers=N`)?* If it will, a separate process is forced. If it is always
+> `--workers=0` on one machine, a cron **thread** inside the web server becomes
+> defensible — less code, and it inherits the cron watchdog at
+> `server.py:509-535`. That question is upstream of this document, so it is
+> worth making sure the two sides have the same answer before either is built.
+> Nothing in §5 changes if the answer is "prefork"; §3.B comes back into play
+> if it is not.
+>
+> Nothing described here is built. `odoo_sim/` is still only `DESIGN.md`.
 
 ## 1. Problem
 
@@ -204,6 +217,43 @@ So the game process can be `odoo-bin game_run -d world`, shipped entirely
 inside the game addon, with **zero addition to the fork's core diff** — which
 `DESIGN.md` has kept to 36 lines across five files.
 
+`sim_init` stays in core, and the split is principled rather than incidental:
+`sim_init` runs against a database *before* the game addon exists, so it cannot
+live in it; `game_run` needs the addon loaded anyway.
+
+### 2.8 The tick blocks for at least ten real seconds
+
+The most consequential finding for a process that runs the tick *and* serves
+the UI. `ir_cron.py:33-34`:
+
+```python
+MIN_RUNS_PER_JOB = 10
+MIN_TIME_PER_JOB = 10  # seconds
+```
+
+and `_run_job` (`ir_cron.py:499-503`) keeps going until **both** are satisfied:
+
+```python
+while status is None and (
+    loop_count < MIN_RUNS_PER_JOB
+    or time.monotonic() < env.context['cron_end_time']   # start + 10 REAL seconds
+):
+```
+
+`status` stays `None` while the job reports remaining work, so a cron using the
+progress API holds the tick for ≥10 runs **and** ≥10 real seconds. That is not
+an exotic path: **21 files call `_commit_progress`**, including `sale`,
+`account`, `stock`, `mail_mail`, `sms` and `base_automation`.
+
+Note the units. `MIN_TIME_PER_JOB` is compared against `time.monotonic()` —
+**real** seconds, correctly, since it is a throughput control and not game
+logic. But at `K = 1440` those ten real seconds are **four game hours** spent
+inside a single job.
+
+Two consequences, both in §5.3: the tick can never share a thread with request
+handling, and `TICK * K` is a lower bound on cron resolution rather than a
+guarantee.
+
 ## 3. The options
 
 The axis that matters is not *how many processes* but **whether the game code
@@ -257,7 +307,7 @@ A FastAPI/Node backend beside Odoo, reaching it through JSON-RPC.
 ### E. A separate process that embeds the ORM — **chosen**
 
 A process that imports Odoo, builds a `Registry`, opens cursors, and runs its
-own loop. `odoo-bin shell` is the existing example of exactly this shape
+own loop. `odoo-bin shell` is the nearest existing example
 (`odoo/cli/shell.py:130-140`):
 
 ```python
@@ -268,6 +318,18 @@ registry = Registry(dbname)
 with registry.cursor() as cr:
     env = api.Environment(cr, api.SUPERUSER_ID, ctx)
 ```
+
+**But do not copy that line literally — `stop=True` serves nothing.** It gates
+the HTTP daemon off (`server.py:659`, `if config['test_enable'] or
+(config['http_enable'] and not stop)`) and returns immediately after loading
+the registry (`server.py:716-727`, `if stop: ... self.stop(); return rc`),
+never reaching `cron_spawn()`. The shell shape embeds the ORM *and serves no
+HTTP*, which is right for a REPL and wrong for us.
+
+`game_run` wants the **serving** variant — `server.start(preload=[db])`,
+without `stop=True` — plus `--max-cron-threads=0` so that `cron_spawn`
+(`server.py:620-633`) iterates `range(0)` and starts none of Odoo's own cron
+threads, leaving ours as the only one. See §5.3.
 
 - **For:** every advantage of B — full ORM, real transactions, one commit
   spanning `game_plot` and `stock_move` — **plus** its own lifecycle. Restart
@@ -322,6 +384,39 @@ not its web client.
 Revisit E1 if the game ever needs many concurrent websocket connections, where
 a threaded WSGI server plus gevent is genuinely the wrong shape. For a world
 with a handful of players it is not.
+
+### 4.2 What "the same process" means here, precisely
+
+The phrase is ambiguous enough to have already caused one misunderstanding, so
+to be exact. There are **two** processes:
+
+| process | contains |
+|---|---|
+| `odoo-bin` | the Odoo web client — accounting, inventory, the usual |
+| `odoo-bin game_run` | **the tick *and* the UI backend** |
+
+"The UI rides in the game process" means the second row: the game loop and the
+game's HTTP endpoints are one OS process. It does **not** mean the game shares
+a process with the Odoo web client — that is option B, and it is what having a
+separate process was for.
+
+### 4.3 That process is multi-threaded, and has to be
+
+§2.8 forces this. A cron using the progress API holds the tick for ≥10 real
+seconds, so a UI request handled on the tick's thread would stall behind it —
+four game hours of stall at `K = 1440`.
+
+So the tick gets its own thread and request handling gets its own. This is
+worth stating plainly because it looks like the "complexity" that counted
+against running the game as a thread inside the web server (§3.B) — but it is
+not the same cost. `ThreadedServer` already runs a thread per request; we are
+adding exactly **one** thread, to a threading model Odoo already owns and
+tests. What §3.B objected to was needing to elect *one* server process to own
+the tick when there are several; that problem is absent here regardless of how
+many threads this process has.
+
+It does mean E1's "single async loop" framing was never really on the table:
+whatever serves HTTP here is concurrent with a tick that blocks.
 
 ## 5. Design
 
@@ -391,7 +486,8 @@ only to spread several workers apart.
 
 What it must keep is the `LISTEN`, so that event-driven crons (`_trigger`,
 which issues `NOTIFY cron_trigger`) still wake the loop immediately instead of
-waiting out the tick:
+waiting out the tick. It runs in **its own thread** (§4.3), started by
+`game_run` after `server.start(preload=[db])` has brought the server up:
 
 ```python
 cr.execute("LISTEN cron_trigger")
@@ -404,6 +500,23 @@ while True:
     IrCron._process_jobs(db_name)              # signalling handled inside (2.6)
     threading.current_thread().dbname = db_name  # _process_jobs deleted it (2.6)
 ```
+
+**The thread must opt into the watchdog.** `process_limit`
+(`server.py:509-535`) enforces `limit_time_real_cron` on threads, but only
+those carrying `type = 'cron'` and a `start_time`:
+
+```python
+if not thread.daemon and thread_type != 'websocket' or thread_type == 'cron':
+    if getattr(thread, 'start_time', None):
+```
+
+Odoo's own runner sets both — `t.type = 'cron'` in `cron_spawn`
+(`server.py:631`) and `thread.start_time = time.time()` around each
+`_process_jobs` call (`server.py:604-608`). Our thread has to do the same, or a
+runaway game cron runs forever with nothing to stop it. This is a second
+argument for the serving bootstrap of §3.E: `process_limit` is driven from
+`ThreadedServer.run`'s main loop, so we get the watchdog only because the
+server is actually running.
 
 **The tick interval is now a game-design parameter.** It replaces
 `SLEEP_INTERVAL = 60` (`server.py:68`), which is where `DESIGN.md` §4.3's
@@ -418,6 +531,14 @@ while True:
 At `TICK = 1` an hourly cron is accurate to 24 game minutes even at `K = 1440`,
 which makes interval crons meaningful again. The cost is one
 `_get_all_ready_jobs` query per second, which is nothing.
+
+**But read that table as a lower bound, not a guarantee.** §2.8 — a job that
+keeps reporting remaining work holds the tick for ≥10 real seconds, and an
+overrunning tick simply starts the next one late. So `TICK * K` is the
+resolution the loop *offers*; what a given cron actually gets also depends on
+what ran before it. Setting `TICK = 1` buys nothing on a world whose crons
+routinely run the full ten seconds, and no smaller `TICK` will fix that — the
+floor is `MIN_TIME_PER_JOB`, not the tick.
 
 `DESIGN.md` §5.2 is unaffected: missed occurrences are still collapsed, by
 design.
@@ -552,9 +673,26 @@ See §5.2. The failure is silent and only shows up when someone reads a
 because it derives from `pg_catalog.now()`. At `K = 1440` an overnight break is
 about 1.3 game years.
 
-Nobody has had to look at that yet. A player who closes the tab and comes back
-in the morning will, immediately and unmistakably. This is the piece of work
-that will force the decision `DESIGN.md` §7-7 defers — **and it is now
+This is no longer hypothetical. Measured on `simdb` while writing this:
+
+```
+$ psql -d simdb -qtAc "SET search_path=public,pg_catalog;
+                       SELECT now(), pg_catalog.now();"
+game_now=2030-01-10 14:04:06+01 | real_now=2026-09-10 13:26:04+02
+
+$ psql -d simdb -qtAc "SELECT count(*) FILTER (WHERE active),
+                              count(*) FILTER (WHERE active AND nextcall < now()),
+                              max(lastcall) FROM ir_cron;"
+18 | 17 | 2026-09-18 17:27:50
+```
+
+**3.3 game years aged unattended, and 17 of 18 active crons overdue**, all
+waiting to fire in one burst on the next tick. The world has been left alone
+for a few real days and its cron schedule is now meaningless.
+
+Nobody has had to *look* at that yet. A player who closes the tab and comes
+back in the morning will, immediately and unmistakably. This is the piece of
+work that will force the decision `DESIGN.md` §7-7 defers — **and it is now
 foreseeable enough to decide before the UI ships, rather than after a player
 loses a world to it.**
 
@@ -614,8 +752,9 @@ are easy to get backwards.
 Deliberately no gameplay. The point is to exercise the whole spine end to end:
 
 1. `odoo_sim/addons/game/__manifest__.py` — depends on `base`, `bus`.
-2. `cli/game_run.py` — the shell-style bootstrap (§3.E) plus the loop of §5.3,
-   serving HTTP on its own port.
+2. `cli/game_run.py` — `server.start(preload=[db])` with
+   `--max-cron-threads=0`, serving HTTP on its own port, plus the loop of §5.3
+   in its own thread (§4.3).
 3. `controllers/main.py` — `GET /game` renders the page; `GET /game/api/clock`
    returns the four values of §5.5.
 4. `views/index.xml` — the minimal standalone template (§5.7).
@@ -643,6 +782,9 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 | Where does the game run? | **A separate process that embeds the ORM** (§3.E). Own lifecycle and a deterministic main loop, without giving up transactions. |
 | Is that not the option you rejected? | **No.** The objection to C was RPC, not processes. Embedding the ORM keeps one commit across game and business tables (§3.C). |
 | How does that process serve HTTP? | **Odoo's dispatcher**, a second `odoo-bin` on its own port (§4.1). Signalling, retry and session auth are already correct there. |
+| Which two things share a process? | **The tick and the UI backend** — not the game and the web client (§4.2). |
+| Serving or non-serving bootstrap? | **Serving**: `server.start(preload=[db])` *without* `stop=True`, which serves nothing (§3.E). |
+| One thread or several? | **Several, necessarily.** A blocking cron would otherwise stall every UI request for ten real seconds (§2.8, §4.3). |
 | Where does the entry point live? | **`game/cli/game_run.py`** inside the addon — addons can ship CLI commands, so the core diff stays at zero (§2.7). |
 | What drives the crons? | **The game loop**, `IrCron._process_jobs` on each tick, with `LISTEN cron_trigger` so triggers still fire immediately (§5.3). |
 | What sets the game's time resolution? | **The tick interval**, replacing `SLEEP_INTERVAL = 60`. This is what lifts `DESIGN.md`'s `K <= 240` ceiling (§5.3). |
