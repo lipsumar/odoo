@@ -6,12 +6,13 @@ well-formed pulses and pass everything here. What is covered is the bookkeeping
 each tick has to get right, which is where the silent failures live.
 """
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from odoo import game_clock
 from odoo.addons.base.models.ir_cron import IrCron
 from odoo.addons.odoo_sim import loop
+from odoo.game_clock import GameClock
 from odoo.tests.common import TransactionCase
 from odoo.tools import config
 
@@ -139,10 +140,21 @@ class TestCronTickBookkeeping(TransactionCase):
         restored anything, so it is disabled here: with no single database to
         fall back to, thread.dbname is the only thing left, exactly as it would
         be in a process pointed at more than one world.
+
+        The clock is *overridden* for the assertion rather than read from the
+        database, so that this runs on an ordinary test database. Without that
+        it could only pass on a database sim_init had been run on, and it read
+        as a test of the tick's bookkeeping while actually asserting the shape
+        of whatever database it happened to be pointed at.
         """
         self.loop.mark_cron_thread()
         with self._no_ready_jobs():
             self.loop.run_cron_tick()
+
+        game_clock.override(self.env.cr.dbname, GameClock(
+            datetime(2030, 1, 1), datetime.now(), 1440, False, timedelta(seconds=5),
+        ))
+        self.addCleanup(game_clock.invalidate, self.env.cr.dbname)
         with patch.dict(config.options, {'db_name': []}):
             self.assertIsNotNone(
                 game_clock.current_clock(),
