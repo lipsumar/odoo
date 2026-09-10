@@ -839,7 +839,47 @@ wrong by the whole local offset. `performance.now()` (§5.5) avoids that by not
 involving a wall clock at all, which is a second reason to prefer it.
 
 So: append `Z` at the parse boundary, once, and never parse these strings any
-other way.
+other way. Three corollaries, each of which is a plausible wrong turn:
+
+**Do not reach for Odoo's `deserializeDateTime`.** It is `fromSQL`, not
+`fromISO` (`addons/web/static/src/core/l10n/dates.js:709`):
+
+```js
+export function deserializeDateTime(value, options = {}) {
+    return DateTime.fromSQL(value, { numberingSystem: "latn", zone: "utc" })
+        .setZone(options?.tz || "default")
+```
+
+`fromSQL` wants Odoo's wire format — `"2026-09-12 22:38:10"`, space-separated —
+so it returns an **Invalid DateTime** on our `T`-separated string rather than a
+wrong one, which at least fails loudly. And note the `.setZone(...)` on the next
+line: even if it parsed, it would convert to the user's timezone, which is the
+opposite of what a raw interpolation basis wants. Use `DateTime.fromISO(v, {
+zone: "utc" })` if you are already carrying Luxon, or the two-line `Date.parse`
+above if you are not.
+
+**The server is right not to emit SQL format**, tempting as it looks: `fromSQL`
+truncates to the second, and one second of `last_tick_real` is **24 game
+minutes** of basis error at `K = 1440`. Precision beats helper compatibility for
+a clock.
+
+**Never pattern-match the string, always parse it.** Python's `isoformat()`
+omits the fractional part entirely when microseconds happen to be zero:
+
+```
+datetime(2026, 9, 9, 12, 0, 0)          -> '2026-09-09T12:00:00'
+datetime(2026, 9, 9, 12, 0, 0, 473543)  -> '2026-09-09T12:00:00.473543'
+```
+
+Both are valid ISO and both parse, but a regex expecting `.ffffff` sees the
+first roughly one tick in a million and fails then and only then.
+
+One thing the client cannot preserve, worth stating so nobody chases it:
+JavaScript's `Date` holds milliseconds, so the microseconds the server carefully
+keeps are truncated at the boundary regardless. That bounds the client's basis
+error at 1 ms real — about 1.4 game seconds at `K = 1440` — which is far below
+the RTT term already accepted above. The microseconds matter for the *server's*
+arithmetic, not for the display.
 
 The residual error is roughly RTT/2 — tens of milliseconds real, so tens of
 *seconds* of game time at `K = 1440`. Acceptable for a displayed clock; if it
@@ -1202,6 +1242,7 @@ Deliberately no gameplay. The point is to exercise the whole spine end to end:
    pulse's own five are written (§6.10), so what milestone 1 owes is the UI's
    half:
    - the clock endpoint agrees with the `game_clock` row;
+   - the JS parses a payload whose microseconds are zero (§5.5);
    - the clock still returns game time *after* a tick has run (§6.7);
    - a write endpoint refuses when `is_running` is false.
 
