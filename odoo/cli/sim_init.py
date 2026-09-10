@@ -47,8 +47,8 @@ class SimInit(Command):
 
     The clock does not advance on its own.  It is an accumulator ticked by the
     game loop (`odoo-bin game_run`), so a world only ages while it is being
-    played.  A freshly created world sits still at --game-start until a loop
-    ticks it for the first time.
+    played.  Until a loop ticks it, a new world drifts one `--max-gap` worth of
+    game time forward and then stands still there.
     """
 
     def run(self, args):
@@ -106,9 +106,17 @@ class SimInit(Command):
             )
             cr.commit()
 
+        # Not "still": readers interpolate from the last tick until the clamp
+        # binds, so an untended world drifts one max_gap * rate forward and
+        # settles there.  Bounded and harmless, but say so rather than promise
+        # a stillness the first reader will disprove.
+        settles = timedelta(seconds=opt.sim_max_gap * clock.rate)
         _logger.info(
-            "%s is now a game world: at %s, running at %sx once ticked "
-            "(freezes after %ss without a tick)",
-            dbname, clock.game_now, clock.rate, opt.sim_max_gap,
+            "%s is now a game world: at %s, running at %sx once ticked",
+            dbname, clock.game_now, clock.rate,
         )
-        _logger.info("The clock is still: run `odoo-bin game_run -d %s` to start time.", dbname)
+        _logger.info(
+            "Nothing is ticking it, so it will drift %s to %s and stand still there. "
+            "Run `odoo-bin game_run -d %s` to start time.",
+            settles, clock.game_now + settles, dbname,
+        )
