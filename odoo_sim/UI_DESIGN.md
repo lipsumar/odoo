@@ -33,7 +33,7 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > for the user to take some actions" — a client of the loop, not a driver of its
 > design.
 >
-> The UI itself is not built. The clock it renders now is.
+> The pulse is built to this document's spec and verified live. The UI is not built.
 
 ## 1. Problem
 
@@ -185,8 +185,19 @@ minute" is exactly the situation a locked UI is in (§5.6).
 
 **So a game world should set `bus.gc_retention_seconds` explicitly**, sized in
 game seconds for the real window wanted: one real hour at `K = 1440` is
-`3600 * 1440`. And the UI must treat reconnection as *resync*, not *replay* —
-see §6.9.
+`3600 * 1440`. `game_run` now warns at startup when the window falls below a
+real hour, quoting the number to set — deliberately warning rather than setting
+it, since which worlds want which backlog is a game-design question. And the UI
+must treat reconnection as *resync*, not *replay* — see §6.9.
+
+This turned out to be an instance rather than a one-off, and `DESIGN.md` §5.12
+now names the shape: **any duration constant subtracted from a game instant and
+compared against a game-time column is denominated in game seconds, and so
+divides by `K` in real terms.** `MIN_DELTA_BEFORE_DEACTIVATION` (7 days → 7 real
+minutes at `K = 1440`) and cron batch windows are the same shape. None of them
+uses raw `datetime.now()`, so `DESIGN.md` §5.4's sweep would never have found
+any of them — this is *correct* code with a surprising outcome, which is the
+harder kind to go looking for.
 
 ### 2.5 The clock is an accumulator owned by the game loop
 
@@ -843,6 +854,40 @@ is the obvious optimisation and it destroys the mechanism: silence has to mean
 death, so a pulse that is suppressed when the world is quiet is indistinguishable
 from a loop that has stopped. The pulse is not a change notification.
 
+#### Pause is not silence — which is what makes three states legible
+
+This falls out of sending unconditionally, and it is the property the lock
+depends on: **a paused world keeps pulsing.** Confirmed on the live world, two
+consecutive pulses one second apart:
+
+```
+game_now        2026-09-13T11:34:20.517063   ← identical
+last_tick_real  2026-09-10T12:03:08.610544
+paused true, running false
+
+game_now        2026-09-13T11:34:20.517063   ← identical
+last_tick_real  2026-09-10T12:03:09.623591   ← still advancing
+paused true, running false
+```
+
+Game time frozen to the microsecond while `last_tick_real` keeps moving — which
+is §2.5's `CASE`-not-`WHERE` correction working, and the reason a resume credits
+nothing for the pause.
+
+So the client can tell three states apart with no ambiguity, and it needs no
+extra signal to do it:
+
+| pulses | `running` | state |
+|---|---|---|
+| arriving | `true` | live |
+| arriving | `false` | **paused** — deliberate, the world is fine |
+| silent | — | **dead** — the loop is gone |
+
+Only death is silent. A lock-on-silence therefore cannot misfire on a
+deliberate pause, and "paused" and "lost contact" are distinguishable at the
+mechanism level rather than needing to be guessed at in the UI. What remains is
+purely how each should *look* and what each should still allow (§9).
+
 #### The lock threshold: count silence, do not compare clocks
 
 `max_gap` is the right magnitude — it is exactly how long the server's own clock
@@ -1068,6 +1113,26 @@ Raising `bus.gc_retention_seconds` (§2.4.1) widens the window but does not
 change the shape: a resync path has to exist regardless, and if it exists and
 works, the window matters much less.
 
+### 6.10 The addon we are about to build in has no tests — new
+
+`odoo/game_clock.py` is well covered — 27 tests, green against both a game
+world and an ordinary database. `addons/odoo_sim/` is not covered at all: the
+clock thread, the cron thread, the pulse and both CLI commands were verified by
+running a world and watching it, which is real evidence but not a regression
+net.
+
+That matters here specifically because the UI is the next thing to go into that
+addon, and everything it depends on lives in the untested half — the pulse most
+of all. Building on it without adding coverage means the first regression shows
+up as a page that quietly displays the wrong time, which is §6.3's failure mode
+returning by another route.
+
+So milestone 1 carries the first tests for the addon rather than deferring them
+(§7), and the pulse is the thing to cover first: that it is sent every tick,
+that it is *still* sent while paused, and that `running` matches
+`is_running`. The middle one is the property the lock depends on and the
+easiest to break with a plausible optimisation.
+
 ## 7. Milestone 1 — the clock on a page
 
 Deliberately no gameplay. The point is to exercise the whole spine end to end:
@@ -1078,16 +1143,21 @@ Deliberately no gameplay. The point is to exercise the whole spine end to end:
    in its own thread (§4.3).
 3. `controllers/main.py` — `GET /game` renders the page; `GET /game/api/clock`
    returns the basis of §5.5.
-4. The clock thread publishes the pulse (§5.6). Milestone 1 needs it: without
-   it the page is wrong in one direction or the other, and which one only shows
-   up under conditions a first run will not reproduce.
+4. ~~The pulse~~ — **done**, and to this spec: `odoo_sim.pulse` on
+   `odoo_sim.world`, every tick, all seven fields, verified on a live world.
 5. `views/index.xml` — the minimal standalone template (§5.7).
 6. `odoo_sim/ui/` — Vite project; subscribe, interpolate with
-   `requestAnimationFrame`, and lock on `max_gap` of silence.
-7. Tests: the endpoint agrees with the `game_clock` row; the clock still
-   returns game time *after* a tick has run (the §6.7 regression);
-   interpolation is continuous across a tick; and a write endpoint refuses once
-   `last_tick_real` is older than `max_gap`.
+   `requestAnimationFrame`, and render the three states of §5.6 — live, paused,
+   locked.
+7. Tests. `addons/odoo_sim/` has none at all (§6.10), so milestone 1 starts the
+   suite rather than adding to one:
+   - the pulse is sent every tick, **and still sent while paused** — the
+     property the lock depends on, and the one a plausible optimisation breaks;
+   - `running` in the payload matches `is_running`;
+   - the clock endpoint agrees with the `game_clock` row;
+   - the clock still returns game time *after* a tick has run (§6.7);
+   - interpolation is continuous across a tick;
+   - a write endpoint refuses when `is_running` is false.
 
 Verifiable in one sentence — and note it is the **opposite** of the criterion
 this document gave before §3.3: on a world at `--rate 1440` the page shows a
@@ -1134,13 +1204,15 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 
 ## 9. Open questions
 
-1. **Does a *paused* world lock the same way a dead one does?** Both stop the
-   clock and both must refuse writes that assume time passes (§5.6). But
-   "paused" is a state the player chose and "lost contact" is a fault, and they
-   should not look alike or offer the same way out. Whether a paused world
-   still allows *some* actions — planning, inspecting, queueing — is a game
-   question rather than a plumbing one, and it is the first real one this
-   design runs into. *(Pausing itself is settled: `DESIGN.md` §3.3.)*
+1. **What should paused and locked each look like, and what should paused still
+   allow?** The mechanism no longer leaves this ambiguous — pause is not silence
+   (§5.6), so the client can tell live, paused and dead apart with certainty.
+   What is left is genuinely a game question: both states must refuse writes that
+   assume time passes, but "paused" is a state the player chose and "lost
+   contact" is a fault, so they should not look alike or offer the same way out.
+   Whether a paused world still allows planning, inspecting or queueing is the
+   first real *design* question this work runs into, as opposed to a plumbing
+   one. *(Pausing itself is settled: `DESIGN.md` §3.3.)*
 2. **Whether the web-client process is needed at all in the long run.** Right
    now it is how you inspect state and how the business side is operated. If
    the game UI eventually covers everything, the second process becomes a
