@@ -14,7 +14,7 @@ walk away from is exactly where you left it when you come back.
 
 ```bash
 # 1. an ordinary Odoo database
-odoo-bin -d mygame -i base,bus --without-demo=all --stop-after-init
+odoo-bin -d mygame --stop-after-init
 
 # 2. make it a world: 720 game seconds per real second
 odoo-bin sim_init -d mygame --rate 720
@@ -22,6 +22,10 @@ odoo-bin sim_init -d mygame --rate 720
 # 3. start time
 odoo-bin game_run -d mygame
 ```
+
+Step 1 needs no `-i`: Odoo installs `base` when it initialises a database, and
+everything else a world needs arrives with it. Add `--without-demo=all` if you
+would rather not have Odoo's demo records in your world.
 
 Game time is now running at 720x. One real second is twelve game minutes; one
 real hour is a game month. Stop the loop with Ctrl-C and the world stops with
@@ -79,6 +83,24 @@ world always settles exactly `max_gap × rate` past its last tick — one game
 hour here — and stays there. It is bounded and harmless; it is not a leak.
 
 ---
+
+### Do I need to install anything?
+
+No. `sim_init`, `game_run` and `sim_pause` are found on the addons path and run
+whether or not the `odoo_sim` module is installed — installing it only matters
+once the game grows models of its own.
+
+`bus` is the one module the loop actually uses, for the world pulse, and it
+installs itself: it is `auto_install`, so it arrives as soon as `web` does, and
+`web` is loaded by default (`--load` defaults to `base,rpc,web`). If you do
+manage to end up without it, `game_run` says so and runs anyway:
+
+```
+bus is not installed on mygame: no world pulse will be published, so clients
+cannot tell a running world from a dead one
+```
+
+The clock and the crons are unaffected — only a UI would notice.
 
 ## Running it
 
@@ -277,7 +299,7 @@ a game-time column.
 
 ```bash
 dropdb --if-exists mygame
-odoo-bin -d mygame -i base,bus --without-demo=all --stop-after-init
+odoo-bin -d mygame --stop-after-init
 odoo-bin sim_init -d mygame --rate 720
 odoo-bin game_run -d mygame              # leave running
 
