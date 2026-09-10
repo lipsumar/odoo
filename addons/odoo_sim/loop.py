@@ -50,6 +50,30 @@ def tick_headroom_error(clock_tick: float, max_gap: timedelta) -> str | None:
     return None
 
 
+def unsupported_workers_error(workers: int) -> str | None:
+    """ Return why prefork cannot host the loop, or ``None`` for threaded mode.
+
+    The clock and cron threads live in this process, and a prefork master forks
+    its HTTP workers *after* they have started and opened database connections.
+    A forked child inherits those sockets without owning them, and the psycopg2
+    cursors come apart on both sides -- observed as ``cursor already closed`` on
+    ``SELECT pg_is_in_recovery()`` and on the clock read itself.
+
+    Threaded mode is the supported shape (DESIGN.md 4.3).  Prefork HTTP is still
+    possible, as a *separate* server pointed at the same world and started with
+    ``--max-cron-threads=0`` so it cannot fire a cron behind the game's back.
+    """
+    if not workers:
+        return None
+    return (
+        f"game_run does not support --workers ({workers}): the clock and cron "
+        f"threads live in this process, and a prefork master forks HTTP workers "
+        f"out from under them, taking their database connections apart. Run "
+        f"threaded instead (--workers=0, the default). If you want prefork HTTP, "
+        f"run it as a separate server on the same world with --max-cron-threads=0."
+    )
+
+
 def retention_warning(retention_seconds: int, rate: float) -> str | None:
     """ Return why the bus backlog is uselessly short on this world, or ``None``.
 

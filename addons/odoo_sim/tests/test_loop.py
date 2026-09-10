@@ -36,6 +36,18 @@ class TestTickHeadroom(TransactionCase):
         self.assertIn('max_gap', error)
 
 
+class TestWorkersGuard(TransactionCase):
+    """Prefork cannot host the loop: the master forks out from under it."""
+
+    def test_threaded_mode_is_fine(self):
+        self.assertIsNone(loop.unsupported_workers_error(0))
+
+    def test_prefork_is_refused(self):
+        error = loop.unsupported_workers_error(4)
+        self.assertIsNotNone(error, "a prefork master would fork the loop's threads")
+        self.assertIn('--max-cron-threads=0', error, "says what to do instead")
+
+
 class TestRetentionWarning(TransactionCase):
     """DESIGN.md 5.12: the bus backlog is denominated in game seconds."""
 

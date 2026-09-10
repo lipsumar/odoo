@@ -108,9 +108,15 @@ The clock and the crons are unaffected — only a UI would notice.
 odoo-bin game_run -d mygame [--clock-tick 1] [--cron-tick 1] [--no-pulse]
 ```
 
-This process owns the world. It advances the clock, fires the crons, and serves
-HTTP, and it forces `--max-cron-threads=0` on itself so nothing else in it can
-fire a cron behind the game's back.
+**`game_run` is a full Odoo server.** It calls the same `server.start()` that
+plain `odoo-bin` does, so the web client is there on `--http-port` (8069 by
+default), you log in normally, and every ordinary Odoo option applies. You do
+not need to run a second `odoo-bin` alongside it.
+
+What it adds is two threads and one refusal: a clock thread advancing game
+time, a cron thread firing crons on game time, and `--max-cron-threads=0`
+forced on itself so Odoo's own poller cannot fire a cron behind the game's
+back.
 
 | option | meaning | default |
 |---|---|---|
@@ -133,16 +139,33 @@ a single late tick would freeze the clock. Lower the tick, or raise max_gap
 with sim_init --force.
 ```
 
-### Anything else you point at the same world
+### Threaded only, no `--workers`
 
-Must be started with `--max-cron-threads=0`:
+`game_run` refuses to start in prefork mode:
 
-```bash
-odoo-bin -d mygame --max-cron-threads=0 --http-port=8070
+```
+game_run does not support --workers (2): the clock and cron threads live in
+this process, and a prefork master forks HTTP workers out from under them,
+taking their database connections apart.
 ```
 
-Otherwise that process polls crons too, on its own schedule, and the game loop
-is no longer the only thing driving the world.
+That is not caution — it was measured. A prefork master forks its workers
+*after* our threads have started and opened connections, and the inherited
+sockets come apart on both sides (`cursor already closed` on the clock read).
+Threaded mode, the default, is the supported shape.
+
+### Anything else you point at the same world
+
+You rarely need a second server, since `game_run` already serves the web
+client. If you do want one — a prefork server for a heavier UI, say — start it
+with `--max-cron-threads=0`:
+
+```bash
+odoo-bin -d mygame --max-cron-threads=0 --workers=4 --http-port=8070
+```
+
+Without that flag it polls crons too, on its own schedule, and the game loop is
+no longer the only thing driving the world.
 
 ---
 

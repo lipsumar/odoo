@@ -65,6 +65,9 @@ class GameRun(Command):
         if opt.game_clock_tick <= 0 or opt.game_cron_tick <= 0:
             sys.exit("--clock-tick and --cron-tick must be strictly positive")
 
+        if error := loop.unsupported_workers_error(odoo.tools.config['workers']):
+            sys.exit(error)
+
         clock = game_clock.clock_for(dbname)
         if clock is None:
             sys.exit(
