@@ -153,6 +153,41 @@ Crucially for a two-process design, the bus fans out through PostgreSQL:
 reaches a browser connected to the web-client process, and vice versa.** No
 extra plumbing needed to cross the process boundary.
 
+Note the cost per message: `_sendone` queues a `bus.bus` row at precommit and
+issues the `NOTIFY` at postcommit (`bus.py:121-166`). A pulse is therefore an
+`INSERT`, not just a notification — fine at one per second, but a reason not to
+raise the pulse rate casually.
+
+### 2.4.1 The bus forgets K times faster than it should
+
+A consequence of the game clock reaching a module nobody was thinking about.
+`_gc_messages` (`bus.py:97-108`) deletes on **game** time:
+
+```python
+timeout_ago = fields.Datetime.now() - datetime.timedelta(seconds=gc_retention_seconds)
+self.env.cr.execute("DELETE FROM bus_bus WHERE create_date < %s", (timeout_ago,))
+```
+
+`fields.Datetime.now()` is game time and so is `create_date`, so the retention
+window is denominated in game seconds. `DEFAULT_GC_RETENTION_SECONDS` is 24
+hours (`bus.py:26`), which in real time is:
+
+| `K` | real catch-up window |
+|---|---|
+| 60 | 24 minutes |
+| 240 | 6 minutes |
+| 1440 | **60 seconds** |
+
+That window is how far back a reconnecting client can replay missed
+notifications using its `last` id. At `K = 1440` a client offline for more than
+a minute has lost game events permanently — and "offline for more than a
+minute" is exactly the situation a locked UI is in (§5.6).
+
+**So a game world should set `bus.gc_retention_seconds` explicitly**, sized in
+game seconds for the real window wanted: one real hour at `K = 1440` is
+`3600 * 1440`. And the UI must treat reconnection as *resync*, not *replay* —
+see §6.9.
+
 ### 2.5 The clock is an accumulator owned by the game loop
 
 **Changed by `DESIGN.md` §3.3.** Game time used to be derived from wall time
@@ -491,24 +526,38 @@ whatever serves HTTP here is concurrent with a tick that blocks.
 
 ### 5.1 Layout
 
+**As built**, the addon is `addons/odoo_sim/`, and this document's earlier
+proposal of `odoo_sim/addons/game/` is superseded:
+
 ```
 odoo_sim/
   DESIGN.md            game clock
   UI_DESIGN.md         this document
-  addons/
-    game/
-      __manifest__.py          depends: base, bus
-      cli/game_run.py          the process entry point (2.7)
-      models/                  game state (Odoo models)
-      controllers/main.py      the page + the json2 API
-      static/dist/            <- vite build output, served raw (2.1)
-  ui/                          the frontend source tree, its own package.json
+  ui/                  the frontend source tree, its own package.json
+
+addons/odoo_sim/       depends: base (add bus when the pulse lands)
+  cli/game_run.py      clock thread + cron thread + serving bootstrap
+  cli/sim_pause.py     pause / resume
+  models/              game state (Odoo models)          <- to build
+  controllers/main.py  the page + the json2 API          <- to build
+  static/dist/         vite build output, served raw (2.1)
 ```
 
-The addon lives under `odoo_sim/addons/`, added to `--addons-path`, and not in
-`addons/` — that directory is upstream's, and the fork's diff against it should
-stay rebaseable. Because an addon can ship a CLI command (§2.7), the whole
-thing adds **nothing** to the core diff.
+I had argued for keeping it out of `addons/` to protect the fork's rebase, and
+that argument does not survive contact: `addons/odoo_sim/` is a *new directory*,
+so it conflicts with nothing upstream and does not touch the diff of any
+existing file. What it buys is that the addon sits on the default addons path,
+so `odoo-bin game_run` is discoverable with no `--addons-path` flag. That is the
+better trade and the doc follows the code.
+
+The one thing to preserve is what §2.7 actually bought: the command ships in the
+addon, so `odoo/` gains nothing. `sim_init` stays in core because it runs before
+the addon exists.
+
+Note also that `game_run` works whether or not the module is *installed* —
+command discovery reads the addons path, not the database. Installation only
+matters once the game has models of its own, which is the point at which the UI
+work begins.
 
 Two processes, one database:
 
@@ -757,16 +806,75 @@ the lowest RTT), not a polling loop.
 The clock thread already runs a short-interval `UPDATE` (`game_clock.tick`), so
 it publishes from where it already is.
 
-#### The threshold is `max_gap`, and that is not a coincidence
+#### The pulse, specified
 
-The pulse must arrive more often than `max_gap`, since `max_gap` is exactly how
-long the server's own clock keeps advancing without a tick. So set the client's
-lock threshold to the same number: **no pulse for `max_gap` → the world has
-frozen underneath us → lock.** The client stops advancing at precisely the
-instant the database stops advancing, and one constant governs both.
+The clock thread already holds the new `GameClock` — `game_clock.tick(cr)`
+returns it precisely so a caller can publish it — so this is a few lines at the
+end of the tick:
 
-With the shipped `DEFAULT_MAX_GAP` of 5 seconds and a pulse on every tick, that
-is a lock about five seconds after the loop dies.
+| | |
+|---|---|
+| channel | `"odoo_sim.world"` |
+| type | `"odoo_sim.pulse"` |
+| cadence | **every tick, unconditionally** |
+| constraint | pulse interval < `max_gap` |
+
+```json
+{
+  "game_now":        "2026-09-10T14:23:07.000Z",
+  "last_tick_real":  "2026-09-10T13:26:04.000Z",
+  "rate":            1440.0,
+  "paused":          false,
+  "max_gap":         5.0,
+  "running":         true,
+  "server_real_now": "2026-09-10T13:26:04.412Z"
+}
+```
+
+Two fields earn their place beyond the basis of §5.5. `running` is
+`game_clock.is_running(clock)` evaluated server-side, so the browser never
+re-derives the predicate — it is the same answer the write path enforces, which
+is what keeps the lock and the guard from drifting apart. `server_real_now` is
+what lets the client correct its own wall-clock skew for *interpolation*
+(§5.5).
+
+**Unconditionally is the part to defend.** Sending only when something changed
+is the obvious optimisation and it destroys the mechanism: silence has to mean
+death, so a pulse that is suppressed when the world is quiet is indistinguishable
+from a loop that has stopped. The pulse is not a change notification.
+
+#### The lock threshold: count silence, do not compare clocks
+
+`max_gap` is the right magnitude — it is exactly how long the server's own clock
+keeps advancing without a tick, so a client that gives up after `max_gap` stops
+at the instant the database stops, and one constant governs both sides. With the
+shipped `DEFAULT_MAX_GAP` of 5 seconds and a pulse per tick, that is a lock
+about five seconds after the loop dies.
+
+**But measure it as elapsed-since-last-pulse-arrived, on `performance.now()` —
+never as `Date.now()` against `last_tick_real`.** The server compares
+PostgreSQL's clock against `last_tick_real`; a browser doing the analogous
+comparison is comparing *its* wall clock against a server timestamp, so a client
+skewed slow locks late and one skewed fast locks spuriously. Elapsed time since
+a locally-observed arrival involves no server timestamp and no absolute clock at
+all, so skew cannot reach it:
+
+```js
+let lastPulse = performance.now();          // on every pulse
+const locked = () => (performance.now() - lastPulse) > maxGap * 1000
+                  || !basis.running;
+```
+
+This splits the two roles cleanly, and they should not be conflated:
+
+| | uses | why |
+|---|---|---|
+| interpolating the clock | absolute basis + `server_real_now` skew correction | needs to agree with the server's *value* |
+| deciding to lock | local monotonic delta only | needs to be immune to the client's clock |
+
+A dropped connection should lock immediately rather than wait out `max_gap` —
+the websocket's own `close`/`error` is a faster and more reliable death signal
+than silence.
 
 #### What "lock" means, and why it is a safety property
 
@@ -782,18 +890,20 @@ So locking means refusing actions, not dimming the clock.
 
 **And the lock cannot only live in the browser.** A client-side lock is a
 courtesy that a stale tab, a reconnecting client, or anything replaying a
-request will miss. The write endpoints must check it too — the reading carries
-`last_tick_real`, so the server-side form is available wherever a cursor is:
+request will miss. `game_clock` now ships the predicate, so the guard is one
+call and must not be re-derived per endpoint:
 
 ```python
-clock = game_clock.clock_for(request.db, request.env.cr)
-if clock.paused or datetime.now() - clock.last_tick_real > clock.max_gap:
+if not game_clock.is_running(game_clock.clock_for(request.db, request.env.cr)):
     raise UserError("The world is not running.")
 ```
 
-The UI lock is the user experience; this is the guarantee. Note it also
-covers `paused`, which the browser lock should treat as a *different* state
-with the same effect on input — see §9.
+`is_running` returns `True` for a database that is not a game world at all,
+which means the guard can sit on a shared write path without breaking ordinary
+Odoo. It covers `paused` as well as a dead loop — the browser should treat
+those as *different states with the same effect on input* (§9).
+
+The UI lock is the user experience; this is the guarantee.
 
 #### Game events ride the same channel
 
@@ -942,6 +1052,22 @@ And `--data-dir` must be *shared*, not separate, or sessions do not carry
 between the two (§5.6). The two requirements pull in opposite directions and
 are easy to get backwards.
 
+### 6.9 Reconnection is a resync, not a replay — new
+
+§2.4.1. The bus's catch-up window is denominated in game seconds, so at
+`K = 1440` it is about sixty real seconds. Any client that was locked, asleep,
+or merely disconnected for longer than that cannot replay what it missed.
+
+This is not an edge case for this UI — it is the *normal* path out of a lock,
+because a lock means the loop was down and a loop that was down for five
+seconds was probably down for longer. So the reconnect handler must re-fetch
+state rather than resume a notification stream, and the design should never
+lean on "the bus will tell us what changed while we were away".
+
+Raising `bus.gc_retention_seconds` (§2.4.1) widens the window but does not
+change the shape: a resync path has to exist regardless, and if it exists and
+works, the window matters much less.
+
 ## 7. Milestone 1 — the clock on a page
 
 Deliberately no gameplay. The point is to exercise the whole spine end to end:
@@ -999,8 +1125,10 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 | Why not just interpolate from one fetch? | **Because the clock can now stop.** Clamped-from-stale freezes a live world; unclamped runs away from a dead one — 20 game hours in 55 real seconds (§5.5). |
 | How often must the pulse arrive? | **More often than `max_gap`** — the same constant that bounds the server's own clock (§5.6). |
 | What happens when the pulse stops? | **The UI locks**, at a threshold of `max_gap`, so it stops exactly when the world does (§5.6). |
+| How is that silence measured? | **Monotonic elapsed since the last pulse arrived** — never a local wall clock against `last_tick_real`, which a skewed client gets wrong in both directions (§5.6). |
 | Does locking mean freezing the clock? | **No — it means refusing actions.** A dead loop still accepts writes it can never process (§5.6). |
-| Is the lock enough in the browser? | **No.** Write endpoints check `last_tick_real` server-side; the browser lock is UX, that is the guarantee (§5.6). |
+| Is the lock enough in the browser? | **No.** Write paths call `game_clock.is_running(...)`; the browser lock is UX, that is the guarantee (§5.6). |
+| What does a reconnecting client do? | **Resync, never replay.** The bus's catch-up window is ~60 real seconds at `K = 1440` (§2.4.1, §6.9). |
 | How do state changes reach the client? | **`bus.bus._sendone`** and a raw WebSocket; it crosses processes via `NOTIFY imbus` (§2.4). Same channel as the pulse. |
 | Who is the player? | **An Odoo user**, `auth='user'`, with a shared `--data-dir` (§5.6). |
 
