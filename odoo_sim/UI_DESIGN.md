@@ -858,6 +858,12 @@ opposite of what a raw interpolation basis wants. Use `DateTime.fromISO(v, {
 zone: "utc" })` if you are already carrying Luxon, or the two-line `Date.parse`
 above if you are not.
 
+**The half-fix is the dangerous one.** Someone who meets the Invalid DateTime
+and repairs it by swapping `fromSQL` for `fromISO` — the obvious minimal
+change — keeps the `.setZone` and gets a *silently* local-time basis: the loud
+failure becomes the quiet one, which is the version of this bug that reaches
+production. Both halves have to move together.
+
 **The server is right not to emit SQL format**, tempting as it looks: `fromSQL`
 truncates to the second, and one second of `last_tick_real` is **24 game
 minutes** of basis error at `K = 1440`. Precision beats helper compatibility for
