@@ -1,6 +1,6 @@
 # Odoo Sim — Materialising the Game
 
-Status: design only, nothing built
+Status: design; the clock it builds on is implemented, the UI is not
 Branch: `odoo-sim`
 Target: Odoo 19.0
 Companion to `DESIGN.md` (the game clock), which is assumed throughout.
@@ -16,19 +16,24 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > lifecycle isolation and a deterministic tick. It is a better answer than the
 > one this document originally gave.
 >
-> **Second revision — pause.** `DESIGN.md` §3.3 now makes game time an
-> accumulator owned by the game loop rather than a function of wall time, so
-> that a world can be paused and does not age unattended. That reverses the
-> premise §5.5 was built on. The local-interpolation design survives; the
-> payload does not, and the clock now needs a heartbeat it did not need before.
-> §2.5, §5.5, §5.6 and §6.3 are rewritten.
+> **Second revision — pause, the pulse, and the lock.** `DESIGN.md` §3.3 makes
+> game time an accumulator owned by the game loop rather than a function of wall
+> time, so a world can be paused and does not age unattended. That reverses the
+> premise §5.5 was built on: the local-interpolation design survives, the
+> payload does not, and the clock now needs a pulse it did not need before.
+> Fetching the time is fine — treating that as something to avoid was purism —
+> but the pulse is what makes the client's clamp usable, and **when it stops,
+> the UI locks**. §2.5, §5.5, §5.6 and §6.3 are rewritten.
+>
+> The clock half is no longer a proposal: `odoo/game_clock.py` on `odoo-sim`
+> now implements it, and §2.5 records the API the UI backend builds on.
 >
 > The premise question of the first revision is settled: the separate process
 > is confirmed, and the UI is "only a way to show the game state to the user and
 > for the user to take some actions" — a client of the loop, not a driver of its
 > design.
 >
-> Nothing described here is built. `odoo_sim/` is still only `DESIGN.md`.
+> The UI itself is not built. The clock it renders now is.
 
 ## 1. Problem
 
@@ -155,16 +160,29 @@ via immutable anchors, which meant the browser could compute it locally forever
 and could not possibly disagree with the server. That is no longer true, and
 the difference is the single most important input to §5.5.
 
-The clock is now `(game_now, last_tick_real, rate, paused)`, advanced by the
-loop:
+The clock is now `(game_now, last_tick_real, rate, paused, max_gap)`, advanced
+by the loop:
 
 ```sql
-UPDATE game_clock
-   SET game_now       = game_now
-                      + LEAST(pg_catalog.now() - last_tick_real, INTERVAL '<max_gap>') * rate,
-       last_tick_real = pg_catalog.now()
- WHERE NOT paused;
+UPDATE public.game_clock
+   SET game_now = CASE
+                    WHEN paused THEN game_now
+                    ELSE game_now
+                       + LEAST(
+                             GREATEST(pg_catalog.now() - last_tick_real, INTERVAL '0'),
+                             max_gap
+                         ) * rate
+                  END,
+       last_tick_real = pg_catalog.now(),
+       paused = COALESCE(%s, paused);
 ```
+
+Note that `last_tick_real` advances **even while paused** — the pause is
+expressed in the `CASE`, not in a `WHERE`. That is deliberate and the UI
+depends on it: were the row simply skipped while paused, `last_tick_real` would
+stay frozen for the length of the pause and resuming would credit the world
+with a clamped `max_gap * rate` jump. As written, a paused stretch is never
+accrued and a resume is continuous.
 
 Readers interpolate between ticks with the same clamped expression. Two
 properties of that design carry straight into the UI:
@@ -178,8 +196,27 @@ interpolating locally never sees a jump when a tick lands.
 **But game time now only advances when something ticks it.** A wall-clock
 formula ran whether or not anyone was home; an accumulator does not. `paused`
 stops it deliberately, and `max_gap` stops it accidentally when the loop dies.
-Neither is observable by a browser holding a snapshot — which is the trap in
-§5.5.
+Neither is observable by a browser holding a snapshot — which is why the UI
+needs a pulse (§5.6).
+
+This is built. `odoo/game_clock.py` now exposes what the UI backend needs:
+
+| | |
+|---|---|
+| `clock_for(dbname, cr=None)` | a reading — `game_now`, `last_tick_real`, `rate`, `paused`, `max_gap` |
+| `tick(cr)` | the clock thread's whole job, and crash recovery with it |
+| `set_paused(cr, bool)` | settles game time, then flips `paused` |
+| `GameClock.game_at(real)` | the clamped interpolation, mirroring `public.now()` |
+
+Two constants to design against: `DEFAULT_MAX_GAP` is **5 real seconds** and
+`CACHE_TTL` is **1 real second**, so a process notices a pause, a resume or a
+dead loop up to a second late. At `K = 1440` that second is 24 game minutes —
+fine for a clock, and a reason the UI should treat the pulse rather than a
+fetched reading as authoritative for *liveness*.
+
+`game_at` also clamps negative elapsed to zero (`GREATEST(..., INTERVAL '0')`),
+because PostgreSQL's wall clock and the reading process's can disagree. The
+browser is a third clock and needs the same guard (§5.5).
 
 ### 2.6 A second process on one database has a contract to keep
 
@@ -516,10 +553,22 @@ game's version is strictly simpler: one database, so no `cron_database_list()`,
 no `postgres` connection, and none of the thundering-herd jitter that exists
 only to spread several workers apart.
 
-This is the **cron** thread specifically. The clock thread — the one-statement
-`UPDATE` of `DESIGN.md` §3.3 — is separate and deliberately shares nothing with
-it (§4.3), because a cron holding this loop for ten real seconds must not be
-able to delay the clock past `max_gap`.
+This is the **cron** thread specifically. The clock thread is separate and
+deliberately shares nothing with it (§4.3), because a cron holding this loop
+for ten real seconds must not be able to delay the clock past `max_gap`. That
+thread is short enough to give in full:
+
+```python
+while True:
+    with registry.cursor() as cr:
+        clock = game_clock.tick(cr)          # the whole clock thread
+    publish_pulse(clock)                     # §5.6
+    time.sleep(CLOCK_INTERVAL)               # < max_gap
+```
+
+`game_clock.tick` is also crash recovery: the statement clamps its own elapsed
+term, so a restart after a kill or a suspend is an ordinary tick that happens
+to have been a long time coming.
 
 What this loop must keep is the `LISTEN`, so that event-driven crons
 (`_trigger`, which issues `NOTIFY cron_trigger`) still wake it immediately
@@ -598,10 +647,14 @@ serialisation-failure retry come from the dispatcher and are not our problem.
 
 ### 5.5 The clock endpoint returns the tick basis, not the time
 
-The obvious design — `GET /game/api/now` every second — is still the wrong one.
-The client still interpolates locally at whatever frame rate it likes. What
-changed with `DESIGN.md` §3.3 is *what* it interpolates from, and the fact that
-the basis now goes stale:
+**Fetching the time is fine** — this document previously treated avoiding it as
+a design goal, and that was purism. It is one small request. What the client
+should *not* do is fetch it at frame rate, because it does not need to: one
+reading plus interpolation is exact between ticks (§2.5), so the fetch sets a
+basis and the browser fills in the gaps.
+
+What changed with `DESIGN.md` §3.3 is *what* it interpolates from, and the fact
+that the basis now goes stale:
 
 ```json
 {
@@ -634,33 +687,18 @@ loop stops: **20 game hours of divergence after 55 real seconds of silence.**
 
 The resolution is not a cleverer formula. The clamp exists to detect that *the
 loop* stopped ticking, and a browser cannot observe ticks. **It has to be
-told.**
+told** — which is the pulse of §5.6.
 
-#### The tick publishes a heartbeat
+So the division of labour is:
 
-The clock thread (`DESIGN.md` §3.3) already runs a short-interval `UPDATE`.
-Have it publish `(game_now, last_tick_real, paused)` on a bus channel, and the
-browser refreshes its interpolation basis from each heartbeat and uses the
-clamped formula. Then it tracks the database exactly: it advances while the
-loop advances, freezes when `paused` flips, and freezes on its own when the
-heartbeats stop, which is precisely the behaviour `max_gap` was introduced to
-give the server.
+| | carries | when |
+|---|---|---|
+| `GET /game/api/clock` | the basis | cold start, reconnect, and whenever the page wants to resync |
+| the pulse (§5.6) | the same basis | every tick or few, and it is what makes the clamp usable |
 
-This does not reintroduce polling — the client never asks. It is one small
-message on a channel the UI already holds open for game events (§5.6), at a
-rate we choose. The heartbeat need not be every tick; it needs to be often
-enough that `max_gap` has not bound between two of them, which makes the
-relationship explicit: **heartbeat interval < `max_gap`**, and `max_gap` is
-already sized as a small multiple of the clock interval.
-
-A page should still render a stale-basis state rather than a frozen clock with
-no explanation — "world paused" and "lost contact" look identical to an
-interpolator and should not look identical to a player.
-
-#### One request is still enough at startup
-
-The `json2` endpoint is the cold-start path and the reconnect path; the bus
-carries it from there.
+The endpoint is not the interesting half. A page that only ever fetched would
+be wrong in one of the two directions above; a page that has the pulse could
+almost skip the fetch. Both exist because the fetch is the cold-start path.
 
 Two corrections the client must make, both of which matter more here than in a
 normal application because errors are multiplied by `K`:
@@ -674,7 +712,7 @@ and keeps the offset.
 correction and across sleep/wake. Use `performance.now()`, which is monotonic:
 
 ```js
-// re-captured on every heartbeat, not just at startup
+// re-captured on every pulse, not just at startup
 let basis;
 function onBasis(msg) {
     basis = {
@@ -689,29 +727,78 @@ function onBasis(msg) {
 function gameNow() {
     if (basis.paused) return basis.gameNow;
     const realNow = basis.t0 + (performance.now() - basis.p0);
-    const gap = Math.min(realNow - basis.lastTickReal, maxGap * 1000);
+    // clamp both ends, exactly as game_at() does: the browser is a third
+    // clock and can read behind PostgreSQL's.
+    const gap = Math.min(Math.max(realNow - basis.lastTickReal, 0), maxGap * 1000);
     return basis.gameNow + gap * rate;
 }
 ```
 
-`gap` is clamped exactly as the server clamps it (§2.5), which is only safe
-because the heartbeat keeps `lastTickReal` fresh — that is the whole point of
-§5.5's trap table.
+`gap` is clamped at both ends exactly as `GameClock.game_at` clamps it (§2.5) —
+`GREATEST(..., 0)` matters here more than it does server-side, because the
+browser's clock is the one most likely to be wrong. And the upper clamp is only
+safe because the pulse keeps `lastTickReal` fresh; that is the whole point of
+the trap table above.
 
 The residual error is roughly RTT/2 — tens of milliseconds real, so tens of
 *seconds* of game time at `K = 1440`. Acceptable for a displayed clock; if it
 ever is not, the fix is the standard one (several samples, keep the one with
 the lowest RTT), not a polling loop.
 
-### 5.6 Push, and authentication
+### 5.6 The pulse, and locking when it stops
 
-**Time now needs a push too** — a slow one. That reverses this document's
-earlier position, and the reason is §5.5: an accumulated clock can stop, and a
-browser cannot see it stop. The bus therefore carries two kinds of traffic: the
-clock heartbeat, at a rate below `max_gap`, and game events as they happen.
+**One message does three jobs**, which is why it is worth designing once:
 
-State changes are the second kind — a harvest completing, a delivery arriving.
-Server side, one call:
+1. **It carries the clock basis**, so the browser's clamp is usable (§5.5).
+2. **It is the liveness pulse.** Its *arrival* is the signal, independent of
+   its contents.
+3. **Its absence locks the UI.**
+
+The clock thread already runs a short-interval `UPDATE` (`game_clock.tick`), so
+it publishes from where it already is.
+
+#### The threshold is `max_gap`, and that is not a coincidence
+
+The pulse must arrive more often than `max_gap`, since `max_gap` is exactly how
+long the server's own clock keeps advancing without a tick. So set the client's
+lock threshold to the same number: **no pulse for `max_gap` → the world has
+frozen underneath us → lock.** The client stops advancing at precisely the
+instant the database stops advancing, and one constant governs both.
+
+With the shipped `DEFAULT_MAX_GAP` of 5 seconds and a pulse on every tick, that
+is a lock about five seconds after the loop dies.
+
+#### What "lock" means, and why it is a safety property
+
+Freezing the clock display is the smallest part. The reason to lock *input* is
+that a dead loop does not stop the world from accepting writes: the web threads
+are alive, PostgreSQL is up, and `auth='user'` still passes. So a player at an
+unlocked page could keep acting into a world that cannot process any of it —
+actions land with a frozen `create_date`, and every consequence that depends on
+a cron (a crop growing, a delivery arriving) simply never happens. The player
+would be accumulating a private, silent divergence from the world.
+
+So locking means refusing actions, not dimming the clock.
+
+**And the lock cannot only live in the browser.** A client-side lock is a
+courtesy that a stale tab, a reconnecting client, or anything replaying a
+request will miss. The write endpoints must check it too — the reading carries
+`last_tick_real`, so the server-side form is available wherever a cursor is:
+
+```python
+clock = game_clock.clock_for(request.db, request.env.cr)
+if clock.paused or datetime.now() - clock.last_tick_real > clock.max_gap:
+    raise UserError("The world is not running.")
+```
+
+The UI lock is the user experience; this is the guarantee. Note it also
+covers `paused`, which the browser lock should treat as a *different* state
+with the same effect on input — see §9.
+
+#### Game events ride the same channel
+
+State changes — a harvest completing, a delivery arriving — are the ordinary
+traffic. Server side, one call:
 
 ```python
 env['bus.bus']._sendone(channel, 'game.event', payload)
@@ -804,11 +891,11 @@ a *new* risk rather than the old one: because the clock can now stop, and
 because a browser interpolating from a snapshot cannot tell a stopped clock
 from a running one, the UI can silently display a time the database does not
 agree with. §5.5 measures it at 20 game hours after 55 real seconds of silence,
-and resolves it with the heartbeat. **The failure mode moved from "the world
+and resolves it with the pulse (§5.6). **The failure mode moved from "the world
 ages while you sleep" to "the page lies about what time it is", and the second
 one is quieter.**
 
-That makes the heartbeat load-bearing rather than a nicety, and it is the one
+That makes the pulse load-bearing rather than a nicety, and it is the one
 part of the clock design the UI owns rather than inherits.
 
 ### 6.4 Two toolchains
@@ -865,21 +952,25 @@ Deliberately no gameplay. The point is to exercise the whole spine end to end:
    in its own thread (§4.3).
 3. `controllers/main.py` — `GET /game` renders the page; `GET /game/api/clock`
    returns the basis of §5.5.
-4. The clock thread publishes the same basis as a heartbeat on a bus channel
-   (§5.5). Milestone 1 needs it: without it the page is wrong in one direction
-   or the other, and which one only shows up under conditions a first run will
-   not reproduce.
+4. The clock thread publishes the pulse (§5.6). Milestone 1 needs it: without
+   it the page is wrong in one direction or the other, and which one only shows
+   up under conditions a first run will not reproduce.
 5. `views/index.xml` — the minimal standalone template (§5.7).
 6. `odoo_sim/ui/` — Vite project; subscribe, interpolate with
-   `requestAnimationFrame`, and render paused and stale as distinct states.
+   `requestAnimationFrame`, and lock on `max_gap` of silence.
 7. Tests: the endpoint agrees with the `game_clock` row; the clock still
-   returns game time *after* a tick has run (the §6.7 regression); and
-   interpolation is continuous across a tick.
+   returns game time *after* a tick has run (the §6.7 regression);
+   interpolation is continuous across a tick; and a write endpoint refuses once
+   `last_tick_real` is older than `max_gap`.
 
 Verifiable in one sentence — and note it is the **opposite** of the criterion
 this document gave before §3.3: on a world at `--rate 1440` the page shows a
-clock advancing a day a minute, and when the game process stops, the page
-**stops with it** rather than running on.
+clock advancing a day a minute, and when the game process is killed, the page
+**stops and locks within `max_gap`** rather than running on.
+
+The kill is the test worth writing first. It is the only one that distinguishes
+this design from the one that preceded it, and it is the one a happy-path first
+run will never perform.
 
 What that proves: the process boots and holds a registry, a standalone page
 boots outside the web client, a foreign build is served raw, the API answers,
@@ -904,20 +995,24 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 | Odoo's asset pipeline, or our own build? | **Our own**, into `static/dist/`. Served raw and untranspiled (§2.1). |
 | Game state as Odoo models, or raw tables? | **Odoo models.** Migrations, constraints and shared transactions (§5.2). |
 | Which dispatcher? | **`json2`** — plain JSON in and out, real status codes (§2.3). |
-| How does the client know the time? | **It interpolates**, from a basis refreshed by heartbeat, using the server's clamped formula. Still no polling (§5.5). |
+| How does the client know the time? | **It fetches a basis and interpolates**, refreshing the basis from the pulse. Fetching is fine; fetching at frame rate is not (§5.5). |
 | Why not just interpolate from one fetch? | **Because the clock can now stop.** Clamped-from-stale freezes a live world; unclamped runs away from a dead one — 20 game hours in 55 real seconds (§5.5). |
-| How often must the heartbeat arrive? | **More often than `max_gap`.** That is the whole constraint. |
-| How do state changes reach the client? | **`bus.bus._sendone`** and a raw WebSocket; it crosses processes via `NOTIFY imbus` (§2.4). Same channel as the heartbeat. |
+| How often must the pulse arrive? | **More often than `max_gap`** — the same constant that bounds the server's own clock (§5.6). |
+| What happens when the pulse stops? | **The UI locks**, at a threshold of `max_gap`, so it stops exactly when the world does (§5.6). |
+| Does locking mean freezing the clock? | **No — it means refusing actions.** A dead loop still accepts writes it can never process (§5.6). |
+| Is the lock enough in the browser? | **No.** Write endpoints check `last_tick_real` server-side; the browser lock is UX, that is the guarantee (§5.6). |
+| How do state changes reach the client? | **`bus.bus._sendone`** and a raw WebSocket; it crosses processes via `NOTIFY imbus` (§2.4). Same channel as the pulse. |
 | Who is the player? | **An Odoo user**, `auth='user'`, with a shared `--data-dir` (§5.6). |
 
 ## 9. Open questions
 
-1. **Heartbeat rate, and what the page shows when it stops.** The constraint is
-   only *below `max_gap`* (§5.5); within that, the choice is a UI question
-   nobody has had to answer yet. And "paused" and "lost contact" are the same
-   thing to an interpolator and must not be the same thing to a player —
-   deciding what each looks like is design work, not plumbing. *(Pausing
-   itself is settled: `DESIGN.md` §3.3.)*
+1. **Does a *paused* world lock the same way a dead one does?** Both stop the
+   clock and both must refuse writes that assume time passes (§5.6). But
+   "paused" is a state the player chose and "lost contact" is a fault, and they
+   should not look alike or offer the same way out. Whether a paused world
+   still allows *some* actions — planning, inspecting, queueing — is a game
+   question rather than a plumbing one, and it is the first real one this
+   design runs into. *(Pausing itself is settled: `DESIGN.md` §3.3.)*
 2. **Whether the web-client process is needed at all in the long run.** Right
    now it is how you inspect state and how the business side is operated. If
    the game UI eventually covers everything, the second process becomes a
