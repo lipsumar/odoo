@@ -1,64 +1,125 @@
 """Accelerated game clock for odoo-sim.
 
 A *game world* is an Odoo database whose business-level "now" runs at a fixed
-multiplier over real time::
+multiplier over real time -- and, crucially, only advances while the game loop
+is ticking it::
 
-    game_now = anchor_game + (real_now - anchor_real) * rate
+    game_now = <game time at the last tick> + clamp(real_now - last_tick) * rate
 
-The three constants are fixed for the lifetime of the world and live in a
-one-row ``game_clock`` table (see :func:`install`).  A database is a game world
-if and only if that table exists and is populated; there is no environment
-variable or configuration flag to keep in sync.
+The clock is therefore an accumulator owned by the loop, not a function of the
+wall clock: a world that nobody is playing does not age.  See ``DESIGN.md``
+section 3.3 for why that reverses the original design, and section 3.1 for what
+the original bought.
+
+The state lives in a one-row ``game_clock`` table (see :func:`install`).  A
+database is a game world if and only if that table exists and is populated;
+there is no environment variable or configuration flag to keep in sync.
 
 The same arithmetic exists twice: here, for everything that reads the clock
 from Python (:meth:`odoo.sql_db.BaseCursor.now`, the ``fields.Date`` /
 ``fields.Datetime`` helpers), and in a generated ``public.now()`` SQL function
 that shadows ``pg_catalog.now()`` for raw SQL in business queries.
-
-See ``odoo_sim/DESIGN.md`` for the full rationale.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
 import typing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 if typing.TYPE_CHECKING:
     from odoo.sql_db import BaseCursor
 
 _logger = logging.getLogger(__name__)
 
-#: Cache of the clock of each database seen by this process.  ``None`` means
-#: "not a game world".  The clock row is immutable, so this never needs
-#: invalidating outside of tests.
-_clocks: dict[str, GameClock | None] = {}
+_ZERO = timedelta(0)
 
-#: Re-entrancy guard: loading a clock opens a cursor, and building a cursor
+#: Default real-time gap after which a clock is assumed to be unattended and
+#: stops advancing.  It bounds two things at once: how long a legitimately
+#: delayed clock thread may take before the world freezes under it, and how
+#: much game time a crashed or suspended process can accrue before the freeze
+#: binds (``max_gap * rate``).  Overridable per world.
+#:
+#: It is also how quickly anything watching the world notices that it died --
+#: the UI locks its controls after this long without a pulse -- so retuning it
+#: retunes that too.
+DEFAULT_MAX_GAP = timedelta(seconds=5)
+
+#: How long a process may reuse a clock reading before re-reading the row.
+#: Interpolation between ticks is exact (DESIGN.md 3.3), so a stale reading is
+#: still the right answer while the loop ticks normally; this only bounds how
+#: late a process notices a pause, a resume, or a loop that died.
+CACHE_TTL = 1.0  # real seconds, measured on time.monotonic()
+
+#: Whether each database seen by this process is a game world.  Cached for the
+#: life of the process: ``Cursor.__init__`` asks on every connection, and the
+#: answer only changes when ``sim_init`` runs.
+_worlds: dict[str, bool] = {}
+
+#: Last clock reading of each database, with the ``time.monotonic()`` at which
+#: it was taken.  ``None`` as the timestamp means "pinned, never expires" and
+#: is used by :func:`override` in tests.
+_readings: dict[str, tuple[GameClock, float | None]] = {}
+
+#: Re-entrancy guard: reading the clock opens a cursor, and building a cursor
 #: asks whether the database is a game world.
 _loading = threading.local()
 
 
 class GameClock:
-    """The mapping from real time to game time of one world."""
+    """One reading of one world's clock.
 
-    __slots__ = ('anchor_game', 'anchor_real', 'rate')
+    Immutable, and only valid for interpolation: ``game_now`` and
+    ``last_tick_real`` move every time the loop ticks.  Interpolating from a
+    stale reading gives the same answer as a fresh one for as long as the loop
+    keeps ticking (DESIGN.md 3.3), which is what makes :data:`CACHE_TTL`
+    liveable.
+    """
 
-    def __init__(self, anchor_real: datetime, anchor_game: datetime, rate: float):
+    __slots__ = ('game_now', 'last_tick_real', 'max_gap', 'paused', 'rate')
+
+    def __init__(
+        self,
+        game_now: datetime,
+        last_tick_real: datetime,
+        rate: float,
+        paused: bool = False,
+        max_gap: timedelta = DEFAULT_MAX_GAP,
+    ):
         """
-        :param anchor_real: real UTC instant at which the world was created (naive)
-        :param anchor_game: game UTC instant corresponding to ``anchor_real`` (naive)
+        :param game_now: game UTC instant as of the last tick (naive)
+        :param last_tick_real: real UTC instant of that tick (naive)
         :param rate: game seconds per real second, strictly positive
+        :param paused: whether the world is explicitly paused
+        :param max_gap: how long an untended clock may advance for
         """
         if rate <= 0:
             raise ValueError(f"game clock rate must be strictly positive, got {rate!r}")
-        self.anchor_real = anchor_real
-        self.anchor_game = anchor_game
+        if max_gap <= _ZERO:
+            raise ValueError(f"game clock max_gap must be strictly positive, got {max_gap!r}")
+        self.game_now = game_now
+        self.last_tick_real = last_tick_real
         self.rate = float(rate)
+        self.paused = paused
+        self.max_gap = max_gap
 
     def game_at(self, real: datetime) -> datetime:
-        """ Return the game time corresponding to the naive UTC instant ``real``. """
-        return self.anchor_game + (real - self.anchor_real) * self.rate
+        """ Return the game time corresponding to the naive UTC instant ``real``.
+
+        Mirrors the ``public.now()`` generated by :meth:`sql_function` exactly,
+        clamp for clamp.
+        """
+        if self.paused:
+            return self.game_now
+        elapsed = real - self.last_tick_real
+        if elapsed < _ZERO:
+            # ``last_tick_real`` is PostgreSQL's wall clock and ``real`` is this
+            # process's; they can disagree.  Never let that move game time back.
+            elapsed = _ZERO
+        elif elapsed > self.max_gap:
+            elapsed = self.max_gap
+        return self.game_now + elapsed * self.rate
 
     def now(self) -> datetime:
         """ Return the current game time, as a naive UTC datetime. """
@@ -67,77 +128,164 @@ class GameClock:
         # clock is what lets freezegun drive this clock in tests.
         return self.game_at(datetime.now())
 
-    def sql_function(self) -> str:
+    @staticmethod
+    def sql_function() -> str:
         """ Return the DDL of the ``public.now()`` that mirrors this clock.
 
         ``pg_catalog.now()`` (transaction start time) and not
         ``clock_timestamp()``, so that the result keeps Odoo's documented
         "transaction's timestamp" semantics and the function is honestly STABLE.
+
+        Nothing is inlined any more -- the function reads the row -- so it never
+        needs regenerating when the clock moves, pauses or resumes.
         """
-        return f"""
+        return """
             CREATE OR REPLACE FUNCTION public.now() RETURNS timestamptz AS $$
-                SELECT TIMESTAMPTZ '{_sql_literal(self.anchor_game)}'
-                     + (pg_catalog.now() - TIMESTAMPTZ '{_sql_literal(self.anchor_real)}')
-                       * {self.rate!r};
+                SELECT CASE
+                         WHEN paused THEN game_now
+                         ELSE game_now
+                            + LEAST(
+                                  GREATEST(pg_catalog.now() - last_tick_real, INTERVAL '0'),
+                                  max_gap
+                              ) * rate
+                       END
+                  FROM public.game_clock;
             $$ LANGUAGE sql STABLE;
         """
 
     def __repr__(self):
-        return (f"GameClock(anchor_real={self.anchor_real!r}, "
-                f"anchor_game={self.anchor_game!r}, rate={self.rate!r})")
+        return (f"GameClock(game_now={self.game_now!r}, "
+                f"last_tick_real={self.last_tick_real!r}, rate={self.rate!r}, "
+                f"paused={self.paused!r}, max_gap={self.max_gap!r})")
 
 
-def _sql_literal(value: datetime) -> str:
-    """ Render a naive UTC datetime as an unambiguous timestamptz literal. """
-    return value.replace(tzinfo=timezone.utc).isoformat(sep=' ')
+_SELECT_CLOCK = """
+    SELECT game_now AT TIME ZONE 'UTC',
+           last_tick_real AT TIME ZONE 'UTC',
+           rate, paused, max_gap
+      FROM public.game_clock
+"""
+
+#: Settle game time up to this instant, then optionally flip ``paused``.
+#: ``last_tick_real`` moves even while paused, so a paused stretch is never
+#: accrued and resuming does not jump.
+_ADVANCE_CLOCK = """
+    UPDATE public.game_clock
+       SET game_now = CASE
+                        WHEN paused THEN game_now
+                        ELSE game_now
+                           + LEAST(
+                                 GREATEST(pg_catalog.now() - last_tick_real, INTERVAL '0'),
+                                 max_gap
+                             ) * rate
+                      END,
+           last_tick_real = pg_catalog.now(),
+           paused = COALESCE(%s, paused)
+ RETURNING game_now AT TIME ZONE 'UTC',
+           last_tick_real AT TIME ZONE 'UTC',
+           rate, paused, max_gap
+"""
 
 
-def clock_for(dbname: str | None) -> GameClock | None:
-    """ Return the clock of ``dbname``, or ``None`` if it is not a game world. """
-    if not dbname:
-        return None
-    try:
-        return _clocks[dbname]
-    except KeyError:
-        pass
-
-    if getattr(_loading, 'busy', False):
-        # We are inside the query below; the cursor it opens must not recurse.
-        return None
-
-    _loading.busy = True
-    try:
-        from odoo.sql_db import db_connect  # noqa: PLC0415 (circular at module level)
-        with db_connect(dbname, readonly=False).cursor() as cr:
-            cr.execute("SELECT to_regclass('public.game_clock')")
-            if cr.fetchone()[0] is None:
-                clock = None
-            else:
-                cr.execute("""
-                    SELECT anchor_real AT TIME ZONE 'UTC',
-                           anchor_game AT TIME ZONE 'UTC',
-                           rate
-                      FROM public.game_clock
-                """)
-                row = cr.fetchone()
-                clock = GameClock(*row) if row else None
-    except Exception:  # noqa: BLE001 - never let the clock break a connection
-        # Do not cache a transient failure: the database may not be reachable
-        # yet, or may not be an Odoo database at all.
-        _logger.warning("Could not read the game clock of %s", dbname, exc_info=True)
-        return None
-    finally:
-        _loading.busy = False
-
+def _remember(dbname: str, clock: GameClock | None) -> GameClock | None:
+    _worlds[dbname] = clock is not None
     if clock is not None:
-        _logger.info("Database %s is a game world: %r", dbname, clock)
-    _clocks[dbname] = clock
+        _readings[dbname] = (clock, time.monotonic())
+    else:
+        _readings.pop(dbname, None)
     return clock
 
 
+def _read(cr: BaseCursor) -> GameClock | None:
+    """ Read the clock of ``cr``'s database, or ``None`` if it is not a world. """
+    cr.execute("SELECT to_regclass('public.game_clock')")
+    if cr.fetchone()[0] is None:
+        return None
+    cr.execute(_SELECT_CLOCK)
+    row = cr.fetchone()
+    return GameClock(*row) if row else None
+
+
+def tick(cr: BaseCursor) -> GameClock | None:
+    """ Advance the clock by the real time elapsed since the last tick.
+
+    This is the whole of the game loop's clock thread, and also the whole of
+    crash recovery: the statement clamps its own elapsed term, so a restart
+    after a kill or a laptop suspend is an ordinary tick that happens to have
+    been a long time coming.
+    """
+    return _advance(cr, None)
+
+
+def set_paused(cr: BaseCursor, paused: bool) -> GameClock | None:
+    """ Pause or resume the world, settling game time up to this instant. """
+    return _advance(cr, paused)
+
+
+def _advance(cr: BaseCursor, paused: bool | None) -> GameClock | None:
+    cr.execute(_ADVANCE_CLOCK, [paused])
+    row = cr.fetchone()
+    clock = GameClock(*row) if row else None
+    return _remember(cr.dbname, clock)
+
+
+def clock_for(dbname: str | None, cr: BaseCursor | None = None) -> GameClock | None:
+    """ Return the clock of ``dbname``, or ``None`` if it is not a game world.
+
+    Pass ``cr`` when a cursor on that database is already open: the reading is
+    one single-row SELECT, and taking it on an existing transaction avoids
+    opening a connection just to ask the time.
+    """
+    if not dbname:
+        return None
+
+    if _worlds.get(dbname) is False:
+        return None
+
+    reading = _readings.get(dbname)
+    if reading is not None:
+        clock, fetched_at = reading
+        if fetched_at is None or (time.monotonic() - fetched_at) < CACHE_TTL:
+            return clock
+
+    if getattr(_loading, 'busy', False):
+        # We are inside the query below; the cursor it opens must not recurse.
+        return reading[0] if reading is not None else None
+
+    _loading.busy = True
+    try:
+        if cr is not None:
+            clock = _read(cr)
+        else:
+            from odoo.sql_db import db_connect  # noqa: PLC0415 (circular at module level)
+            with db_connect(dbname, readonly=False).cursor() as own_cr:
+                clock = _read(own_cr)
+    except Exception:  # noqa: BLE001 - never let the clock break a connection
+        # Do not cache a transient failure: the database may not be reachable
+        # yet, or may not be an Odoo database at all.  Keep serving the last
+        # good reading if we have one -- interpolation degrades gracefully.
+        _logger.warning("Could not read the game clock of %s", dbname, exc_info=True)
+        return reading[0] if reading is not None else None
+    finally:
+        _loading.busy = False
+
+    if clock is not None and dbname not in _worlds:
+        _logger.info("Database %s is a game world: %r", dbname, clock)
+    return _remember(dbname, clock)
+
+
 def is_sim_database(dbname: str | None) -> bool:
-    """ Return whether ``dbname`` is a game world. """
-    return clock_for(dbname) is not None
+    """ Return whether ``dbname`` is a game world.
+
+    Asked on every ``Cursor`` construction, so it must stay cheap: the answer
+    is cached for the life of the process and never re-read.
+    """
+    if not dbname:
+        return False
+    try:
+        return _worlds[dbname]
+    except KeyError:
+        return clock_for(dbname) is not None
 
 
 def current_clock() -> GameClock | None:
@@ -148,6 +296,9 @@ def current_clock() -> GameClock | None:
     dispatcher, the RPC layer, the cron runner and ``odoo-bin shell`` all set --
     falling back to the single configured database.  There is one world per
     database (DESIGN.md section 9), so that fallback is unambiguous.
+
+    Note that ``IrCron._process_jobs`` *deletes* ``thread.dbname`` when it
+    returns (DESIGN.md 5.8), so a game loop must re-set it after every tick.
     """
     dbname = getattr(threading.current_thread(), 'dbname', None)
     if not dbname:
@@ -165,42 +316,86 @@ def now() -> datetime:
     return clock.now() if clock is not None else datetime.now()
 
 
-def install(cr: BaseCursor, anchor_real: datetime, anchor_game: datetime, rate: float) -> GameClock:
-    """ Turn the database behind ``cr`` into a game world.
+def is_running(clock: GameClock | None, real: datetime | None = None) -> bool:
+    """ Return whether ``clock``'s world is actually progressing.
 
-    Creates the one-row ``game_clock`` table, stores the constants, and
-    generates the ``public.now()`` that inlines them.  The caller commits.
+    False when the world is paused, and when nothing has ticked it for longer
+    than its ``max_gap`` -- at which point game time has stopped for every
+    reader, even though PostgreSQL, the web workers and the HTTP stack are all
+    still up and happily accepting writes.
+
+    That combination is the one hazard the clamp does not remove by itself: a
+    player acting into a world that is not running gets records stamped with a
+    frozen ``create_date``, and no cron will ever process the consequences.
+    Guard write paths with this rather than re-deriving it per endpoint.
+
+    A database that is not a game world is always "running": ordinary Odoo has
+    no loop to stop.
     """
-    clock = GameClock(anchor_real, anchor_game, rate)
+    if clock is None:
+        return True
+    if clock.paused:
+        return False
+    return (real if real is not None else datetime.now()) - clock.last_tick_real < clock.max_gap
+
+
+def install(
+    cr: BaseCursor,
+    game_now: datetime,
+    rate: float,
+    max_gap: timedelta = DEFAULT_MAX_GAP,
+) -> GameClock:
+    """ Create (or reset) the game clock of ``cr``'s database.
+
+    The world starts paused-in-effect at ``game_now``: ``last_tick_real`` is set
+    to the database's clock, so no time accrues until a loop ticks it.
+    """
+    if rate <= 0:
+        raise ValueError(f"game clock rate must be strictly positive, got {rate!r}")
+    if max_gap <= _ZERO:
+        raise ValueError(f"game clock max_gap must be strictly positive, got {max_gap!r}")
+
     cr.execute("""
         CREATE TABLE IF NOT EXISTS public.game_clock (
-            id          boolean PRIMARY KEY DEFAULT true CHECK (id),
-            anchor_real timestamptz NOT NULL,
-            anchor_game timestamptz NOT NULL,
-            rate        double precision NOT NULL
+            id             boolean PRIMARY KEY DEFAULT true CHECK (id),
+            game_now       timestamptz NOT NULL,
+            last_tick_real timestamptz NOT NULL,
+            rate           double precision NOT NULL CHECK (rate > 0),
+            paused         boolean NOT NULL DEFAULT false,
+            max_gap        interval NOT NULL CHECK (max_gap > INTERVAL '0')
         )
     """)
+    cr.execute("DELETE FROM public.game_clock")
     cr.execute("""
-        INSERT INTO public.game_clock (id, anchor_real, anchor_game, rate)
-             VALUES (true, %s, %s, %s)
-        ON CONFLICT (id) DO UPDATE
-                SET anchor_real = EXCLUDED.anchor_real,
-                    anchor_game = EXCLUDED.anchor_game,
-                    rate = EXCLUDED.rate
-    """, [_sql_literal(anchor_real), _sql_literal(anchor_game), clock.rate])
-    cr.execute(clock.sql_function())
+        INSERT INTO public.game_clock (game_now, last_tick_real, rate, paused, max_gap)
+        VALUES (%s AT TIME ZONE 'UTC', pg_catalog.now(), %s, false, %s)
+    """, [game_now, rate, max_gap])
+    cr.execute(GameClock.sql_function())
+
     invalidate(cr.dbname)
-    return clock
+    clock = _read(cr)
+    assert clock is not None, "the clock we just installed must be readable"
+    return _remember(cr.dbname, clock)
 
 
 def invalidate(dbname: str | None = None) -> None:
     """ Drop the cached clock of ``dbname``, or of every database. """
     if dbname is None:
-        _clocks.clear()
+        _worlds.clear()
+        _readings.clear()
     else:
-        _clocks.pop(dbname, None)
+        _worlds.pop(dbname, None)
+        _readings.pop(dbname, None)
 
 
 def override(dbname: str, clock: GameClock | None) -> None:
-    """ Force the clock of ``dbname`` without touching the database (tests). """
-    _clocks[dbname] = clock
+    """ Force the clock of ``dbname`` without touching the database (tests).
+
+    The pinned reading never expires, so a test keeps the clock it asked for.
+    """
+    if clock is None:
+        _worlds[dbname] = False
+        _readings.pop(dbname, None)
+    else:
+        _worlds[dbname] = True
+        _readings[dbname] = (clock, None)
