@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+<!--
+    The game page: a standalone document that boots one app and nothing else,
+    in the mould of point_of_sale's index (UI_DESIGN.md 2.2).
+
+    Deliberately no t-call-assets and no reference to web.assets_backend. The
+    bundle here is built by vite and served raw off disk (2.1), so the only
+    thing this template does is point at it and hand over the bootstrap blob.
+-->
+<template id="index" name="Odoo Sim">&lt;!DOCTYPE html&gt;
+<html>
+    <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Odoo Sim</title>
+        <script type="text/javascript">
+            // qweb's `json` is scriptsafe: it escapes &lt;, &gt; and &amp; as JSON
+            // unicode escapes, which is what makes a server-side blob safe to
+            // drop inside a script tag (odoo/tools/json.py).
+            var odooSim = <t t-out="json.dumps(bootstrap)"/>;
+        </script>
+        <t t-foreach="styles" t-as="style_url">
+            <link rel="stylesheet" t-att-href="style_url"/>
+        </t>
+    </head>
+    <body>
+        <t t-if="scripts">
+            <div id="game"/>
+            <t t-foreach="scripts" t-as="script_url">
+                <script type="module" t-att-src="script_url"></script>
+            </t>
+        </t>
+        <t t-else="">
+            <!--
+                Not an error: the backend landed before the frontend did, and
+                this page is reachable and useful in the meantime. The blob
+                above is real, so the browser console already has a live clock
+                basis to poke at.
+            -->
+            <style>
+                body { margin: 0; font: 14px/1.6 system-ui, sans-serif; }
+                main { max-width: 34rem; margin: 4rem auto; padding: 0 1.5rem; }
+                pre { background: #f4f4f5; padding: 1rem; overflow-x: auto; }
+            </style>
+            <main>
+                <h1>The frontend is not built</h1>
+                <p>
+                    The game's backend is answering — <code>/game/api/clock</code>
+                    works, and this page already carries a clock basis in
+                    <code>window.odooSim</code>. What is missing is the bundle:
+                    nothing has been written to
+                    <code>addons/odoo_sim/static/dist/</code> yet.
+                </p>
+                <pre>cd odoo_sim/ui
+npm install
+npm run build</pre>
+                <p>
+                    Then reload. For day-to-day work run <code>npm run dev</code>
+                    instead and use Vite's own server, which proxies this one.
+                </p>
+            </main>
+        </t>
+    </body>
+</html>
+</template>
+
+</odoo>

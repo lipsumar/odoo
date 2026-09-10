@@ -86,9 +86,20 @@ hour here — and stays there. It is bounded and harmless; it is not a leak.
 
 ### Do I need to install anything?
 
-No. `sim_init`, `game_run` and `sim_pause` are found on the addons path and run
-whether or not the `odoo_sim` module is installed — installing it only matters
-once the game grows models of its own.
+Not to run a world. `sim_init`, `game_run` and `sim_pause` are found on the
+addons path and run whether or not the `odoo_sim` module is installed.
+
+**The UI is the exception.** Routes and templates come from the registry, so
+`/game` and `/game/api/clock` exist only on a database that has the module
+installed:
+
+```bash
+odoo-bin -d mygame -i odoo_sim --stop-after-init
+```
+
+Then `game_run` serves the game page at `http://localhost:8069/game` alongside
+the ordinary web client. Until the frontend is built the page says so and tells
+you how; the clock endpoint works either way.
 
 `bus` is the one module the loop actually uses, for the world pulse, and it
 installs itself: it is `auto_install`, so it arrives as soon as `web` does, and

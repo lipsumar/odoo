@@ -8,12 +8,16 @@ Hosts the odoo-sim game loop.
 
 The command it ships, ``odoo-bin game_run``, is discovered straight from the
 addons path (``odoo/cli/command.py`` ``load_addons_commands``) and therefore
-works whether or not this module is installed on the database.  Installing it
-is only needed once the game grows models of its own.
+works whether or not this module is installed on the database.
 
-See ``odoo_sim/DESIGN.md`` at the root of the repository.
+The **UI is the exception**: routes and templates come from the registry, so
+``/game`` and ``/game/api/clock`` exist only once this module is installed.
+
+See ``odoo_sim/DESIGN.md`` and ``odoo_sim/UI_DESIGN.md`` at the root of the
+repository.
     """,
     'depends': ['base', 'bus'],
+    'data': ['views/index.xml'],
     'license': 'LGPL-3',
     'installable': True,
     'auto_install': False,
