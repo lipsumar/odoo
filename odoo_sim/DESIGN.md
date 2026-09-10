@@ -181,6 +181,11 @@ immutable removes all of it:
 Adding a variable rate later means reintroducing the anchor/rate row and
 re-anchoring on change. Nothing in this design blocks that.
 
+**Partly reversed by §3.3.** The rate stays fixed, but deriving game time from
+wall time turned out to mean a world ages while nobody is playing (§5.6), which
+is not liveable for a game. §3.3 keeps the fixed rate and moves the clock to an
+accumulator owned by the game loop. Two of the four bullets above survive.
+
 ### 3.2 Storage
 
 The authoritative values live in a one-row table, written once at world
@@ -219,6 +224,147 @@ default behaviour of `--force` on an existing world, not something the operator
 has to remember.
 
 One world per database. Multiple worlds means multiple databases.
+
+### 3.3 Pausing: the loop owns the clock
+
+§3.1 fixed the rate to avoid a mutable clock, and that bought real simplicity.
+What it did not anticipate is that a clock derived from wall time keeps running
+when nobody is playing (§5.6). Measured on `simdb`: 3.2 game years across one
+unattended night, coming back with 17 of 18 active crons overdue. A game needs
+to be pausable, so this is not a wart to document — it has to be fixed.
+
+**Decision (reverses part of §3.1): game time is accumulated by the game loop,
+not derived from wall time.** `K` stays fixed for the lifetime of the world;
+what changes is that the clock only advances while something ticks it.
+
+```sql
+CREATE TABLE game_clock (
+    id             boolean PRIMARY KEY DEFAULT true CHECK (id),
+    game_now       timestamptz NOT NULL,      -- game time as of the last tick
+    last_tick_real timestamptz NOT NULL,      -- real instant of that tick
+    rate           double precision NOT NULL,
+    paused         boolean NOT NULL DEFAULT false
+);
+```
+
+A tick is one statement:
+
+```sql
+UPDATE game_clock
+   SET game_now       = game_now
+                      + LEAST(pg_catalog.now() - last_tick_real, INTERVAL '<max_gap>') * rate,
+       last_tick_real = pg_catalog.now()
+ WHERE NOT paused;
+```
+
+and readers interpolate between ticks with the same expression:
+
+```sql
+CREATE OR REPLACE FUNCTION public.now() RETURNS timestamptz AS $$
+    SELECT CASE WHEN paused THEN game_now
+                ELSE game_now
+                   + LEAST(pg_catalog.now() - last_tick_real, INTERVAL '<max_gap>') * rate
+           END
+      FROM public.game_clock;
+$$ LANGUAGE sql STABLE;
+```
+
+Three properties make this work, all verified rather than argued:
+
+**Interpolation is exactly continuous across a tick.** Immediately before tick
+`n` a reader computes `game_now(n-1) + (t - last_tick(n-1)) * K`; immediately
+after, `game_now(n) + (t - T(n)) * K`. Substituting the update rule makes those
+algebraically identical, so there is no jump at a tick boundary and no
+monotonicity guard to write. §3.1's "monotonicity is free" survives intact.
+
+**A restart is just a tick.** Because the update clamps its own elapsed term,
+recovery after a crash, a `kill -9` or a laptop suspend is the same statement,
+and it moves time forward by at most `max_gap * K`. Nothing special-cases
+startup.
+
+**Pausing has two forms and we need both.** `paused` is the explicit control
+the player gets, and it is instantaneous. `max_gap` is the implicit one: it
+caps what a dead loop can accrue, so a world freezes on its own when the
+process is killed or the machine sleeps — overshooting by at most `max_gap * K`
+before it binds.
+
+`max_gap` must sit comfortably above the worst tick overrun. §5.11's
+ten-second floor means one cron can hold a tick for ten real seconds or more,
+so advancing the clock from the thread that runs `_process_jobs` would trip the
+clamp on a busy tick and silently lose game time. **The loop therefore runs two
+threads: a clock thread doing nothing but the UPDATE above on a short interval,
+and a cron thread calling `_process_jobs`.** Keeping them independent is what
+lets `max_gap` be a small multiple of the clock interval instead of a guess
+about how long crons take.
+
+#### What this costs
+
+§3.1 listed four things the inlined clock bought. Two survive, two are spent:
+
+| §3.1 claim | after §3.3 |
+|---|---|
+| Monotonicity is free | **survives** — continuity across ticks, clamped elapsed |
+| No cross-worker sync | **survives** — the table is the single source, and nothing caches across a transaction |
+| No table read per call | **spent** — `public.now()` reads one row |
+| Python caches the constants forever | **spent** — `game_now` / `last_tick_real` must be re-read |
+
+The Python cost is bounded by the cache that already exists:
+`BaseCursor.now()` memoises into `self._now` and resets it on commit and
+rollback (`sql_db.py:271`, `:577`, `:588`), so this is **one extra single-row
+SELECT per transaction**, against a one-row table that lives in shared buffers.
+`game_clock._clocks` may go on caching `rate` and the fact that a database is a
+world; it may no longer cache the moving parts.
+
+The cache-invalidation problem §3.1 feared does not come back. It was a
+consequence of caching mutable values *across* transactions, and the fix is to
+stop caching them rather than to invalidate them.
+
+#### Liveness: the clamp needs an observer
+
+The clamp detects that *the loop* stopped ticking, so only a reader that can
+see `last_tick_real` move is able to use it. Anything holding a basis it
+fetched once cannot: with the clamp it freezes after `max_gap` even though the
+world is running fine, and without it, it runs away when the world stops. The
+UI session measured both failures at `K = 1440`, `max_gap = 5s`; the unclamped
+error reaches twenty game hours after fifty-five real seconds of silence.
+
+There is no cleverer formula. A detached reader has to be **told**, so the
+clock thread publishes a pulse carrying `(game_now, last_tick_real, paused)`,
+and a client refreshes its basis from it and then clamps exactly as the server
+does. The one constraint is **pulse interval < `max_gap`**, which is free given
+`max_gap` is already a multiple of the clock interval.
+
+`max_gap` therefore governs both sides: how long the database keeps advancing
+without a tick, *and* how quickly a client notices a dead world. The constant
+carries a comment saying so.
+
+#### A world can be down while the database is up
+
+A dead loop stops game time and stops nothing else: PostgreSQL is up, the web
+threads are alive, authentication still passes. A player can act into a world
+that cannot process the consequences — the records land with a frozen
+`create_date` and no cron ever runs on them. Freezing the clock does not
+prevent that; it is what makes it silent.
+
+So the check belongs on the write path, not only in the client:
+
+```python
+if not game_clock.is_running(game_clock.clock_for(request.db, request.env.cr)):
+    raise UserError("The world is not running.")
+```
+
+`is_running()` lives in `game_clock` rather than being re-derived per endpoint,
+and returns True for a database that is not a game world, so guarding an
+ordinary Odoo path with it is a no-op.
+
+#### Consequence for the UI
+
+`UI_DESIGN.md` hands the browser a basis and computes game time locally. The
+shape survives — the browser runs the same interpolation — but the payload
+becomes `(game_now, last_tick_real, rate, paused)`, refreshed from the pulse
+above rather than fetched once. The client still never polls; it listens. When
+the pulse stops for `max_gap` the UI locks its controls rather than merely
+stopping its clock, for the reason in the previous section.
 
 ## 4. Design
 
@@ -317,22 +463,46 @@ unaffected at any rate.
 **Until step 3 below is built, `K` above roughly 240 is not usable for anything
 that depends on interval crons.**
 
-**Approach:** run with `--max-cron-threads=0` to disable the built-in poller,
-and have the game loop call `IrCron._process_jobs(db_name)` directly on each
-real tick.
+**Approach — decided.** The game loop is **its own process**, not a thread
+inside a web server: `odoo-bin game_run -d <db>`, run with
+`--max-cron-threads=0` so `cron_spawn` iterates `range(0)`
+(`server.py:620-633`) and our own threads are the only ones firing crons. Any
+other `odoo-bin` pointed at the world — an admin backend, say — must carry the
+same flag so it cannot fire a cron behind the game's back.
+
+The command lives in the game addon as `cli/game_run.py`, not in core:
+`load_addons_commands` (`odoo/cli/command.py:68-85`) globs the addons path for
+`*/cli/<command>.py`, so this needs **no upstream diff at all**. (`sim_init`
+stays in core, because it runs against a database before the game addon
+exists; `game_run` needs the addon anyway.)
+
+It bootstraps with the serving form, `server.start(preload=[db])` *without*
+`stop=True` — `stop=True` is the `odoo-bin shell` form, which returns before
+ever listening (`server.py:659`, `:716`) — because the same process also serves
+the UI over Odoo's own dispatcher. The UI is a view onto game state and a way
+to take actions; it does not drive the loop's design.
+
+Three threads then: Odoo's HTTP threads, a clock thread (§3.3), and a cron
+thread doing
 
 ```python
-# game loop, every real tick
+# cron thread, every tick
 from odoo.addons.base.models.ir_cron import IrCron
 IrCron._process_jobs(db_name)
+threading.current_thread().dbname = db_name   # _process_jobs deleted it (§5.8)
 ```
 
-This gives deterministic ordering and a single place to reason about game
-progression — while still reusing Odoo's scheduling arithmetic instead of
-reimplementing it. It also keeps the diff against upstream small.
-
 `_process_jobs` collects all ready jobs and runs each once per call
-(`ir_cron.py:187-215`), which is exactly the tick semantics we want.
+(`ir_cron.py:187-215`), which is exactly the tick semantics we want, so we
+reuse Odoo's scheduling arithmetic rather than reimplementing it.
+
+Two details that are easy to miss. The cron thread must set `type = 'cron'` and
+a `start_time` on itself, or it never inherits the `limit_time_real_cron`
+watchdog in `process_limit` (`server.py:509-535`) and a runaway game cron runs
+forever. And with `max_cron_threads = 0` nothing runs `LISTEN cron_trigger`, so
+`_trigger()`-based crons wait out a tick unless the loop keeps that
+subscription itself — worth doing, since it is the mechanism event-driven game
+logic will lean on.
 
 ## 5. Known issues and risks
 
@@ -393,7 +563,7 @@ game, driven by observed behaviour rather than a blanket sweep.
 - `limit_time_real`, HTTP timeouts, connection pooling — untouched.
 - Log timestamps — should remain real time for debuggability.
 
-### 5.6 The clock never stops
+### 5.6 The clock never stops — **resolved by §3.3**
 
 Game time is derived from `pg_catalog.now()`, not from process uptime, so it
 advances whether or not a server is running. At `K = 1440` a lunch break is two
@@ -410,7 +580,9 @@ the elapsed game time. A real pause is the `rate = 0` case that §3.1
 deliberately deferred, and it brings back the mutable-clock machinery and the
 timestamp-tie problem with it.
 
-**Worth deciding deliberately before the world holds anything valuable.**
+**Decided:** the game needs a pause, so §3.3 moves the clock to a loop-owned
+accumulator. The paragraphs above describe the behaviour that decision removes;
+they are kept because they are what motivated it.
 
 ### 5.7 `_reschedule_later` replays every skipped interval — measured, benign
 
@@ -443,6 +615,19 @@ per database with `-d <db>`, but it is the first thing that breaks if a sim
 process is ever given more than one database. `cr.now()` is unaffected: it has
 the cursor, and therefore the database.
 
+**And `_process_jobs` deletes it.** `ir_cron.py:191` sets
+`threading.current_thread().dbname`, and the `finally` at `:211-213` removes it
+unconditionally — it does not restore a previous value. So a game loop that
+sets `thread.dbname` once at startup, the way `odoo/cli/shell.py:136` does,
+loses it after the first tick; from then on `current_clock()` falls through to
+`config['db_name']` and, if that is not exactly one database, silently returns
+**real** time for the rest of the run.
+
+Mitigation: always run the loop with `-d <db>`, and re-set `thread.dbname`
+after each `_process_jobs` call. This fails silently and no existing test would
+catch it, so the loop's test suite must assert that the clock still reads game
+time *after* a tick. (Found by the UI design session.)
+
 ### 5.9 DDL defaults bind at CREATE TABLE time
 
 Verified on a live world: a table created while `search_path = public,
@@ -462,6 +647,67 @@ against a game world, exactly as it does under faketime. The first cursor for a
 given database in a process additionally pays one `to_regclass` lookup to decide
 whether the database is a world at all. Both are negligible, noted for
 completeness.
+
+### 5.11 A cron can hold its worker for ten real seconds
+
+`_run_job` (`ir_cron.py:499-503`) loops on `time.monotonic()`:
+
+```python
+while status is None and (
+    loop_count < MIN_RUNS_PER_JOB                       # 10
+    or time.monotonic() < env.context['cron_end_time']  # start + 10 real seconds
+):
+```
+
+It exits when the job reports completion, or when **both** bounds are met
+(`MIN_RUNS_PER_JOB` / `MIN_TIME_PER_JOB`, `ir_cron.py:33-34`). So any cron
+using the progress API that still reports remaining work holds its worker for
+at least ten real seconds — four game hours at `K = 1440`. Not an exotic path:
+20 non-test files call `_commit_progress`, including `sale`, `account`,
+`stock`, `mail_mail`, `sms` and `base_automation`.
+
+Two consequences. The tick interval is a **lower bound** on cron resolution
+rather than a guarantee — an overrunning tick starts the next one late, and no
+smaller interval beats the floor. And the clock must not be advanced from the
+thread that runs `_process_jobs` (§3.3).
+
+### 5.12 Duration constants are denominated in game time
+
+§5.3 flagged `MIN_DELTA_BEFORE_DEACTIVATION` as a one-off. It is not: **any
+constant subtracted from a game instant and compared against a game-time column
+is measured in game seconds**, and divides by `K` to become a real-world
+window. The code is usually correct — it is using `fields.Datetime.now()`
+exactly as it should — and the outcome is still surprising.
+
+The one that bites first is the bus, found by the UI session while costing out
+the pulse. `bus.bus._gc_messages` (`addons/bus/models/bus.py:97-108`):
+
+```python
+timeout_ago = fields.Datetime.now() - timedelta(seconds=gc_retention_seconds)
+cr.execute("DELETE FROM bus_bus WHERE create_date < %s", (timeout_ago,))
+```
+
+`DEFAULT_GC_RETENTION_SECONDS` is 24 hours (`bus.py:26`), so the backlog a
+reconnecting client can replay is **sixty real seconds at `K = 1440`**, six
+real minutes at `K = 240`. A client offline longer than that has lost game
+events permanently, which makes reconnection a resync rather than a replay.
+
+`game_run` warns at startup when that window is under a real hour, and prints
+the value to set for the window you actually want. It does not set it: which
+worlds want which backlog is a game-design question, not something a loop
+should decide.
+
+Known members of this family so far:
+
+| constant | where | real window at `K = 1440` |
+|---|---|---|
+| `bus.gc_retention_seconds` (24h) | `bus.py:26` | 60 seconds |
+| `MIN_DELTA_BEFORE_DEACTIVATION` (7d) | `ir_cron.py:37` | 7 minutes |
+| cron batch windows (§5.2) | per cron | varies |
+
+Worth checking for this shape whenever a module enters the game, alongside the
+raw `datetime.now()` sweep of §5.4 — which would not have caught any of
+these, since none of them uses raw `datetime.now()`.
 
 ## 6. Alternative considered: libfaketime
 
@@ -488,23 +734,32 @@ proves too costly.
    databases.
 2. **Done.** Core edits in `odoo/orm/fields_temporal.py`; `BaseCursor.now()`
    and `TestCursor.now()` repointed at the clock.
-3. **Outstanding.** Run with `--max-cron-threads=0`; drive
-   `IrCron._process_jobs` from the game loop. This is what lifts the `K <= 240`
-   ceiling of §4.3, and is the obvious next piece of work.
+3. **Done.** `addons/odoo_sim/cli/game_run.py`: forces `max_cron_threads = 0`,
+   loads the registry in the main thread, then runs a clock thread and a cron
+   thread under Odoo's serving bootstrap. Lifts the `K <= 240` ceiling of §4.3.
 4. **Partly done.** `ir_cron.py:273` fixed, along with two more instances of the
    same defect (§5.1). `MIN_DELTA_BEFORE_DEACTIVATION` not yet reconsidered
    (§5.3).
 5. Audit gameplay crons for the batch-window issue (§5.2).
 6. Sweep raw `datetime.now()` per module as each domain enters the game.
-7. Decide what to do about the clock never stopping (§5.6). Either accept that
-   a world ages while unattended, or reopen the variable-rate design for a
-   `rate = 0` pause. **Decide before the world holds anything worth keeping.**
-8. Make `--force` re-anchor at the current *game* instant by default when a
-   world already exists (§3.2), instead of requiring `--game-start`.
+7. **Done.** §3.3's accumulator, in `game_clock.py` (`GameClock`, `tick()`,
+   `set_paused()`, `is_running()`, TTL'd readings), the new table in
+   `sim_init.py`, and `addons/odoo_sim/cli/sim_pause.py` as the control
+   surface. The pulse is built too: the clock thread publishes
+   `odoo_sim.pulse` on `odoo_sim.world` every tick, unconditionally.
+8. **Done, as a consequence of §3.3.** `sim_init --force` carries the existing
+   world's game instant across unless `--game-start` overrides it, so changing
+   the rate between runs no longer rewinds the world.
 
-Ordered by what actually blocks play: 3 lifts the `K <= 240` ceiling, 7 decides
-whether a world can be left alone, 8 is a half-hour of ergonomics. 5 and 6 are
-driven by observed behaviour, not worth doing speculatively.
+With 3, 7 and 8 built, what remains is 4 (§5.3's deactivation threshold) and
+5 and 6, all driven by observed behaviour rather than worth doing
+speculatively — now widened by §5.12, which says what shape to look for.
+
+**Test coverage:** `game_clock` has 27 tests and the pulse has 5 (§8). What
+remains uncovered is the loop's threading and the two CLI commands, which were
+verified by running a world rather than by a suite — a regression in the tick
+cadence or the cron poller would not be caught. Worth a harness once the loop
+grows any logic beyond "call this every N seconds".
 
 Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
 `install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
@@ -519,23 +774,39 @@ wraps it with its own `freeze_time` class supporting test-class decoration.
 `ODOO_FAKETIME_TEST_MODE` provides a working reference implementation of the
 SQL-side override to model ours on.
 
-Built, in `odoo/addons/base/tests/test_game_clock.py` (14 tests, registered in
+Built, in `odoo/addons/base/tests/test_game_clock.py` (27 tests, registered in
 `odoo/addons/base/tests/__init__.py`):
 
 ```bash
 odoo-bin -d <db> --test-tags /base:TestGameClockMath,/base:TestGameClockDatabase,/base:TestGameClockCron --stop-after-init
+odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim --stop-after-init
 ```
 
-- `TestGameClockMath` — the mapping itself under `freeze_time`, at
-  `K ∈ {0.5, 1, 60, 1000}`: the multiplier, anchor offsets, monotonicity, and
-  that a non-sim process is exactly real time.
-- `TestGameClockDatabase` — that the generated `public.now()` implements the
-  same formula as Python, that `create_date` / `write_date` carry game time,
-  and that both cursor classes read the clock.
-- `TestGameClockCron` — readiness on game time at `K = 3600`, and a regression
-  test for §5.1.
+The suite is run against **both** an ordinary database and one that is itself a
+game world, for the reason in the last bullet below.
 
-Two things learned writing them:
+- `TestGameClockMath` — the mapping itself under `freeze_time`, at
+  `K ∈ {0.5, 1, 60, 1000}`: the multiplier, game offsets, monotonicity, and
+  that a non-sim process is exactly real time. Plus the §3.3 properties: that
+  an untended clock freezes, that a paused one does not move, that clock skew
+  cannot rewind it, that interpolation is continuous across a tick, and
+  `is_running()`.
+- `TestGameClockDatabase` — that the generated `public.now()` implements the
+  same formula as Python — including when clamped and when paused — that
+  `create_date` / `write_date` carry game time, that both cursor classes read
+  the clock, and that `tick()` advances, clamps, respects a pause, and does not
+  accrue the paused stretch on resume.
+- `TestGameClockCron` — readiness on game time at `K = 3600`, a regression
+  test for §5.1, and one for §5.8's `thread.dbname` deletion.
+- `TestWorldPulse` (in `addons/odoo_sim/tests/`) — that a pulse carries a
+  basis a client can interpolate from, that `running` is decided server-side,
+  and above all **that a paused world keeps pulsing**. That last one is the
+  property the UI's lock rests on, and precisely what a plausible "only send on
+  change" optimisation would delete, so it is a test and not only a comment.
+  The pulse lives in `addons/odoo_sim/pulse.py` rather than inside the CLI
+  command, so that testing it does not mean importing a `Command`.
+
+Three things learned writing them:
 
 - The SQL and Python clocks must be compared **at the same real instant**, by
   selecting `pg_catalog.now()` and `public.now()` in one query and feeding the
@@ -545,6 +816,15 @@ Two things learned writing them:
 - `freezegun` drives the real-time input of the clock, which is why
   `GameClock.now()` reads `datetime.now()` and never `time.monotonic()`. It
   cannot reach PostgreSQL, so the SQL agreement test must not run under it.
+  (§3.3's `CACHE_TTL` is measured on `time.monotonic()` precisely so that
+  freezegun does not expire readings under a test.)
+- **A test may not assume its own database is not a game world.** Developing
+  this feature means having one to hand and running the suite against it, and
+  three tests asserting *unchanged upstream* behaviour passed only because the
+  database happened to be ordinary. They now say so explicitly, and the real
+  cursor's SQL fallback skips on a world, because `search_path` sends even that
+  fallback through `public.now()` (`sql_db.py:383-390`). The suite is run both
+  ways.
 
 ## 9. Decisions
 
@@ -558,6 +838,9 @@ Resolved during design review:
 | `res_users_apikeys` DDL default (§2.4)? | **Leave as is**, bound to real time. Infrastructure, not gameplay. |
 | How is sim mode enabled? | **Detected from the database** — a populated `game_clock` table, cached per process. No env var, no config flag (§4.1). |
 | Which clock is authoritative for `cr.now()`? | **Python.** The SQL function stays, for raw SQL in business queries, but it no longer stamps records. Forced by §2.2.1: the test cursor never queries the database. |
+| Game loop: a thread in the server, or its own process? | **Its own process** — `odoo-bin game_run`, hosted in the game addon so the upstream diff stays at zero (§4.3). |
+| Does that process also serve the UI? | **Yes**, over Odoo's own dispatcher. The UI shows game state and takes player actions; it is a client of the loop, not a driver of its design. |
+| Can a world be paused? | **Yes** (§3.3), reversing part of §3.1. Explicitly via a `paused` flag, and implicitly via a staleness clamp so a killed process or a sleeping laptop freezes the world instead of ageing it. |
 
 Note that with rate changes gone, the question of a rate changing mid-request
 disappears. `cr.now()` remains cached per transaction (`odoo/sql_db.py:271`),
