@@ -33,7 +33,7 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > for the user to take some actions" — a client of the loop, not a driver of its
 > design.
 >
-> The pulse is built to this document's spec and verified live. The UI is not built.
+> The pulse is built, tested and verified live. The UI is not built.
 
 ## 1. Problem
 
@@ -546,13 +546,20 @@ odoo_sim/
   UI_DESIGN.md         this document
   ui/                  the frontend source tree, its own package.json
 
-addons/odoo_sim/       depends: base (add bus when the pulse lands)
+addons/odoo_sim/       depends: base, bus
+  pulse.py             CHANNEL / TYPE / payload() / send()   (5.6)
   cli/game_run.py      clock thread + cron thread + serving bootstrap
   cli/sim_pause.py     pause / resume
+  tests/test_pulse.py  5 tests
   models/              game state (Odoo models)          <- to build
   controllers/main.py  the page + the json2 API          <- to build
   static/dist/         vite build output, served raw (2.1)
 ```
+
+`pulse.py` sits beside the CLI rather than inside it deliberately: the pulse is
+a module the UI backend imports, and reaching it through a `Command` subclass
+would have made testing it require loading a CLI module. Import it as
+`from odoo.addons.odoo_sim import pulse`.
 
 I had argued for keeping it out of `addons/` to protect the fork's rebase, and
 that argument does not survive contact: `addons/odoo_sim/` is a *new directory*,
@@ -774,13 +781,16 @@ correction and across sleep/wake. Use `performance.now()`, which is monotonic:
 ```js
 // re-captured on every pulse, not just at startup
 let basis;
+const utc = s => Date.parse(s + 'Z');   // naive ISO from the server; see below
+
 function onBasis(msg) {
     basis = {
-        gameNow:      Date.parse(msg.game_now),
-        lastTickReal: Date.parse(msg.last_tick_real),
+        gameNow:      utc(msg.game_now),
+        lastTickReal: utc(msg.last_tick_real),
         paused:       msg.paused,
-        t0:           Date.parse(msg.server_real_now),  // server real ms
-        p0:           performance.now(),                // monotonic reference
+        running:      msg.running,
+        t0:           utc(msg.server_real_now),   // server real ms
+        p0:           performance.now(),          // monotonic reference
     };
 }
 
@@ -800,6 +810,37 @@ browser's clock is the one most likely to be wrong. And the upper clamp is only
 safe because the pulse keeps `lastTickReal` fresh; that is the whole point of
 the trap table above.
 
+#### Parse the timestamps as UTC, explicitly
+
+Note the `+ 'Z'` in `onBasis` above. It is not decoration.
+
+`pulse.payload` serialises with `datetime.isoformat()` on naive UTC datetimes,
+so the strings carry **no offset**: `"2026-09-12T22:38:10.473543"`. JavaScript
+parses an ISO *date-time* with no offset as **local time** — while parsing a
+date-*only* string as UTC, an inconsistency that lives in the language spec and
+has caught everyone at least once.
+
+The damage is subtle because it partly cancels. `gap` is a difference between
+two timestamps from the same payload, so the offset cancels there and the clock
+still *ticks* at the right rate — which is why this survives a casual test. What
+does not cancel is the absolute value: the displayed game time is wrong by the
+browser's UTC offset, multiplied by `K`.
+
+| browser | `K` | display is wrong by |
+|---|---|---|
+| UTC+2 | 60 | 5 game days |
+| UTC+2 | 1440 | **120 game days** |
+| UTC−5 | 1440 | 300 game days |
+| UTC+5:30 | 1440 | 330 game days |
+
+And it stops cancelling entirely the moment anyone compares a parsed
+`server_real_now` against `Date.now()` — the obvious way to compute skew, and
+wrong by the whole local offset. `performance.now()` (§5.5) avoids that by not
+involving a wall clock at all, which is a second reason to prefer it.
+
+So: append `Z` at the parse boundary, once, and never parse these strings any
+other way.
+
 The residual error is roughly RTT/2 — tens of milliseconds real, so tens of
 *seconds* of game time at `K = 1440`. Acceptable for a displayed clock; if it
 ever is not, the fix is the standard one (several samples, keep the one with
@@ -817,11 +858,19 @@ the lowest RTT), not a polling loop.
 The clock thread already runs a short-interval `UPDATE` (`game_clock.tick`), so
 it publishes from where it already is.
 
-#### The pulse, specified
+#### The pulse, as built
 
-The clock thread already holds the new `GameClock` — `game_clock.tick(cr)`
-returns it precisely so a caller can publish it — so this is a few lines at the
-end of the tick:
+Built, and in its own module rather than inside the CLI command — testing it
+otherwise would have meant importing a `Command` subclass:
+
+```python
+from odoo.addons.odoo_sim import pulse
+
+pulse.CHANNEL                      # 'odoo_sim.world'
+pulse.TYPE                         # 'odoo_sim.pulse'
+pulse.payload(clock, real=None)    # -> dict, the seven fields below
+pulse.send(cr, clock)              # -> bool
+```
 
 | | |
 |---|---|
@@ -1113,25 +1162,25 @@ Raising `bus.gc_retention_seconds` (§2.4.1) widens the window but does not
 change the shape: a resync path has to exist regardless, and if it exists and
 works, the window matters much less.
 
-### 6.10 The addon we are about to build in has no tests — new
+### 6.10 What is and is not covered by tests
 
-`odoo/game_clock.py` is well covered — 27 tests, green against both a game
-world and an ordinary database. `addons/odoo_sim/` is not covered at all: the
-clock thread, the cron thread, the pulse and both CLI commands were verified by
-running a world and watching it, which is real evidence but not a regression
-net.
+Narrowed — the pulse is now tested, so this is no longer the blanket gap it was
+one revision ago.
 
-That matters here specifically because the UI is the next thing to go into that
-addon, and everything it depends on lives in the untested half — the pulse most
-of all. Building on it without adding coverage means the first regression shows
-up as a page that quietly displays the wrong time, which is §6.3's failure mode
-returning by another route.
+**Covered:** `odoo/game_clock.py` (27 tests, green against both a game world and
+an ordinary database) and `addons/odoo_sim/pulse.py` (5 tests), including the
+one the lock depends on — that a pulse is *still sent while paused*.
 
-So milestone 1 carries the first tests for the addon rather than deferring them
-(§7), and the pulse is the thing to cover first: that it is sent every tick,
-that it is *still* sent while paused, and that `running` matches
-`is_running`. The middle one is the property the lock depends on and the
-easiest to break with a plausible optimisation.
+**Not covered:** the loop's threading and the two CLI commands, verified by
+running a world rather than by a suite. That is real evidence, but a regression
+in the clock thread's timing or its shutdown behaviour would not be caught.
+
+For the UI the residual risk is narrow and worth naming: the pulse's *contents*
+are tested, its *cadence in a live loop* is not. A clock thread that stalls or
+drifts still emits well-formed pulses, and the client's own lock is what catches
+that — so the lock is not merely a UX nicety, it is the only automated check
+that the loop is keeping time. Worth remembering before anyone decides the lock
+is over-engineering.
 
 ## 7. Milestone 1 — the clock on a page
 
@@ -1149,15 +1198,22 @@ Deliberately no gameplay. The point is to exercise the whole spine end to end:
 6. `odoo_sim/ui/` — Vite project; subscribe, interpolate with
    `requestAnimationFrame`, and render the three states of §5.6 — live, paused,
    locked.
-7. Tests. `addons/odoo_sim/` has none at all (§6.10), so milestone 1 starts the
-   suite rather than adding to one:
-   - the pulse is sent every tick, **and still sent while paused** — the
-     property the lock depends on, and the one a plausible optimisation breaks;
-   - `running` in the payload matches `is_running`;
+7. Tests, added to the suite that now exists in `addons/odoo_sim/tests/` — the
+   pulse's own five are written (§6.10), so what milestone 1 owes is the UI's
+   half:
    - the clock endpoint agrees with the `game_clock` row;
    - the clock still returns game time *after* a tick has run (§6.7);
-   - interpolation is continuous across a tick;
    - a write endpoint refuses when `is_running` is false.
+
+   Run with `odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim
+   --stop-after-init`.
+
+**The JS has a spec to conform to, and it is executable.** `test_pulse.py`
+rebuilds a `GameClock` from the payload alone and asserts it reproduces
+`game_at()`. That is precisely the arithmetic §5.5's `gameNow()` implements, so
+when the two disagree, that test is the authority and the JS is wrong. Worth
+porting the same round-trip into the frontend's own tests against a captured
+payload, so the two clamps cannot drift.
 
 Verifiable in one sentence — and note it is the **opposite** of the criterion
 this document gave before §3.3: on a world at `--rate 1440` the page shows a
