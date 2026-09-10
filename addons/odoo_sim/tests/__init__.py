@@ -1,1 +1,1 @@
-from . import test_pulse
+from . import test_loop, test_pulse

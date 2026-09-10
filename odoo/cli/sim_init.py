@@ -12,6 +12,28 @@ from . import Command
 _logger = logging.getLogger(__name__)
 
 
+def starting_instant(cr, game_start, existing):
+    """ Return the game instant a world should start, or restart, at.
+
+    :param game_start: the ``--game-start`` argument, or ``None``
+    :param existing: the world's current clock when overwriting, else ``None``
+    :raises ValueError: if ``game_start`` is not ISO 8601
+
+    Carrying an existing world's instant across is what makes changing the rate
+    between runs safe: without it, ``--force`` would rewind the world to the
+    present and break the monotonicity everything else relies on.  It used to be
+    the operator's job to remember ``--game-start`` (DESIGN.md 7-8).
+    """
+    if game_start:
+        return datetime.fromisoformat(game_start).replace(tzinfo=None)
+    if existing is not None:
+        return existing.now()
+    # Anchor on the server clock rather than this process's, so that a fresh
+    # world starts where the database thinks "now" is.
+    cr.execute("SELECT (pg_catalog.now() AT TIME ZONE 'UTC')")
+    return cr.fetchone()[0]
+
+
 class SimInit(Command):
     """Turn a database into an odoo-sim game world with an accelerated clock."""
 
@@ -72,23 +94,12 @@ class SimInit(Command):
                         f"running at rate {existing.rate}). Use --force to overwrite."
                     )
 
-            if opt.sim_game_start:
-                try:
-                    game_now = datetime.fromisoformat(opt.sim_game_start).replace(tzinfo=None)
-                except ValueError:
-                    sys.exit(f"--game-start is not a valid ISO 8601 datetime: {opt.sim_game_start!r}")
-            elif existing is not None:
-                # Overwriting a live world: carry its game instant across rather
-                # than rewinding it to the present.  Changing the rate between
-                # runs is the supported escape hatch (DESIGN.md 3.2), and it
-                # must not move game time backwards.
-                game_now = existing.now()
+            try:
+                game_now = starting_instant(cr, opt.sim_game_start, existing)
+            except ValueError:
+                sys.exit(f"--game-start is not a valid ISO 8601 datetime: {opt.sim_game_start!r}")
+            if existing is not None and not opt.sim_game_start:
                 _logger.info("Carrying the existing game instant across: %s", game_now)
-            else:
-                # Anchor on the server clock rather than this process's, so that
-                # a fresh world starts where the database thinks "now" is.
-                cr.execute("SELECT (pg_catalog.now() AT TIME ZONE 'UTC')")
-                game_now = cr.fetchone()[0]
 
             clock = odoo.game_clock.install(
                 cr, game_now, opt.sim_rate, timedelta(seconds=opt.sim_max_gap),

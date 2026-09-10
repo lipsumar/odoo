@@ -755,11 +755,13 @@ With 3, 7 and 8 built, what remains is 4 (§5.3's deactivation threshold) and
 5 and 6, all driven by observed behaviour rather than worth doing
 speculatively — now widened by §5.12, which says what shape to look for.
 
-**Test coverage:** `game_clock` has 27 tests and the pulse has 5 (§8). What
-remains uncovered is the loop's threading and the two CLI commands, which were
-verified by running a world rather than by a suite — a regression in the tick
-cadence or the cron poller would not be caught. Worth a harness once the loop
-grows any logic beyond "call this every N seconds".
+**Test coverage:** 32 tests on the clock and `sim_init`, 18 on the loop and
+the pulse (§8). What remains uncovered is the **threading itself** — tick
+cadence, the `select`/`LISTEN` wiring, and the bootstrap in `game_run.run()`.
+A clock thread that stalled or drifted would still emit well-formed pulses and
+pass everything, so a client's lock is currently the only check that the loop
+keeps time. Worth a harness if the threads grow any logic beyond "call this
+every N seconds".
 
 Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
 `install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
@@ -798,13 +800,23 @@ game world, for the reason in the last bullet below.
   accrue the paused stretch on resume.
 - `TestGameClockCron` — readiness on game time at `K = 3600`, a regression
   test for §5.1, and one for §5.8's `thread.dbname` deletion.
+- `TestSimInitStartingInstant` — which instant a world is created at, and
+  above all that `--force` carries an existing world's instant across instead
+  of rewinding it to the present (§7-8).
 - `TestWorldPulse` (in `addons/odoo_sim/tests/`) — that a pulse carries a
   basis a client can interpolate from, that `running` is decided server-side,
   and above all **that a paused world keeps pulsing**. That last one is the
   property the UI's lock rests on, and precisely what a plausible "only send on
   change" optimisation would delete, so it is a test and not only a comment.
-  The pulse lives in `addons/odoo_sim/pulse.py` rather than inside the CLI
-  command, so that testing it does not mean importing a `Command`.
+- `TestTickHeadroom`, `TestRetentionWarning`, `TestCronTickBookkeeping` — the
+  loop's arithmetic and, most importantly, that a cron tick puts back the
+  `thread.dbname` that `_process_jobs` deleted (§5.8).
+
+Behaviour worth testing was moved out of the CLI commands into
+`addons/odoo_sim/pulse.py`, `addons/odoo_sim/loop.py` and
+`sim_init.starting_instant()`, so that reaching it does not mean importing a
+`Command` or starting a thread. What is left in the commands is argument
+parsing and bootstrap.
 
 Three things learned writing them:
 
@@ -818,6 +830,15 @@ Three things learned writing them:
   cannot reach PostgreSQL, so the SQL agreement test must not run under it.
   (§3.3's `CACHE_TTL` is measured on `time.monotonic()` precisely so that
   freezegun does not expire readings under a test.)
+- **Assert the regression, then reintroduce the bug and watch it fail.** The
+  first version of `TestCronTickBookkeeping` passed an injected stand-in thread
+  to `run_cron_tick`, and passed just as happily with the `thread.dbname`
+  re-set deleted: `_process_jobs` reaches for
+  `threading.current_thread()`, so the stand-in was never the object under
+  test. Every regression test here has since been checked by putting its bug
+  back. One of them — "the clock still reads game time after a tick" — only
+  discriminates once `config['db_name']` is emptied, because §5.8's fallback
+  would otherwise rescue it.
 - **A test may not assume its own database is not a game world.** Developing
   this feature means having one to hand and running the suite against it, and
   three tests asserting *unchanged upstream* behaviour passed only because the

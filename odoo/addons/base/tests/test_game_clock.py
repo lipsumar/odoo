@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from odoo import fields, game_clock
 from odoo.addons.base.models.ir_cron import MAX_FAIL_TIME, BadModuleState, IrCron
+from odoo.cli import sim_init
 from odoo.game_clock import GameClock
 from odoo.tests.common import BaseCase, TransactionCase, freeze_time
 from odoo.tools import config
@@ -388,6 +389,51 @@ class TestGameClockDatabase(TransactionCase):
         with freeze_time(ANCHOR_REAL), patch.object(game_clock, 'current_clock', return_value=clock):
             # 2031-03-04 23:30 UTC is already the 5th in Sydney (UTC+11)
             self.assertEqual(fields.Date.context_today(user), date(2031, 3, 5))
+
+
+class TestSimInitStartingInstant(TransactionCase):
+    """Which game instant a world is created, or re-created, at."""
+
+    def test_explicit_game_start_wins(self):
+        instant = sim_init.starting_instant(self.env.cr, '2031-03-04T15:30:45', None)
+        self.assertEqual(instant, datetime(2031, 3, 4, 15, 30, 45))
+        self.assertIsNone(instant.tzinfo, "stored naive UTC like everything else")
+
+    def test_explicit_game_start_wins_over_an_existing_world(self):
+        """ --game-start is how you deliberately move a world's clock. """
+        existing = a_clock(GAME_START, 1440)
+        instant = sim_init.starting_instant(self.env.cr, '2031-03-04T15:30:45', existing)
+        self.assertEqual(instant, datetime(2031, 3, 4, 15, 30, 45))
+
+    def test_a_bad_game_start_is_rejected(self):
+        with self.assertRaises(ValueError):
+            sim_init.starting_instant(self.env.cr, 'the fourth of March', None)
+
+    def test_an_existing_world_carries_its_instant_across(self):
+        """ DESIGN.md 7-8: --force must not rewind a world to the present.
+
+        Changing the rate between runs is the supported escape hatch, and it
+        only works if the world keeps the time it had reached. Anchoring on real
+        now instead would move game time backwards by however far the world had
+        got -- here, a hundred game days -- and break the monotonicity that
+        write_date ordering and optimistic concurrency rely on.
+        """
+        existing = a_clock(GAME_START, 1440)
+        with freeze_time(ANCHOR_REAL):
+            instant = sim_init.starting_instant(self.env.cr, None, existing)
+        self.assertEqual(instant, GAME_START)
+        self.assertGreater(
+            instant, datetime.now(),
+            "the world's own instant, not the real one it would rewind to",
+        )
+
+    def test_a_fresh_world_starts_at_the_database_clock(self):
+        """ And on the database's clock, not this process's. """
+        instant = sim_init.starting_instant(self.env.cr, None, None)
+        self.env.cr.execute("SELECT (pg_catalog.now() AT TIME ZONE 'UTC')")
+        self.assertAlmostEqual(
+            instant, self.env.cr.fetchone()[0], delta=timedelta(seconds=1),
+        )
 
 
 class TestGameClockCron(TransactionCase):
