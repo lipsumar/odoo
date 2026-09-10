@@ -1,6 +1,7 @@
 # Odoo Sim — Materialising the Game
 
-Status: design; the clock it builds on is implemented, the UI is not
+Status: design; the clock, the loop and the pulse it builds on are implemented,
+the UI is not
 Branch: `odoo-sim`
 Target: Odoo 19.0
 Companion to `DESIGN.md` (the game clock), which is assumed throughout.
@@ -34,6 +35,24 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > design.
 >
 > The pulse is built, tested and verified live. The UI is not built.
+>
+> **Third revision — one process, and the frontend decided.** This document was
+> written against a two-process deployment. `game_run` **as built is a full Odoo
+> server**: it calls the same `server.start()` that plain `odoo-bin` does, so it
+> serves the web client on its own port and the second `odoo-bin` assumed
+> throughout §4, §5.1, §5.6 and §6.8 is not needed. It also **refuses
+> `--workers`**, which turns §3.B's tick-election problem from something option E
+> avoids into something the shape makes impossible. §3.B, §4.1, §4.2, §4.3,
+> §5.1, §5.3, §5.6, §5.7, §6.6, §6.7, §6.8 and §7 are corrected. The choice of
+> §3.E stands; the argument for it has moved, and §4.2 says where.
+>
+> Two of §9's open questions are now answered. **The frontend is Vite and
+> vanilla JavaScript** — no framework (§6.4, §8). **Paused and locked must look
+> different**: paused is a state the player chose, locked is an error state
+> (§5.6, §8). What a paused world still *allows* stays open (§9.1).
+>
+> The clock, the loop, the pulse and both CLI commands are built and tested
+> (§6.10). The UI is not built.
 
 ## 1. Problem
 
@@ -268,6 +287,14 @@ browser is a third clock and needs the same guard (§5.5).
 
 This is the finding that matters most for the decision, and it cuts both ways.
 
+**How much of it still binds, now that there is one process (§4.2):** the
+signalling contract below is kept for free, because the game serves HTTP through
+Odoo's own dispatcher and drives crons through `_process_jobs`, and both call
+`check_signaling` themselves. It becomes a live concern again only if the
+optional second server of §6.8 is running. The `thread.dbname` edge at the end
+of this section is *not* conditional on any of that — it bites a single process
+just as hard, and §6.7 records how it was fixed.
+
 **Cache coherence is not automatic.** `odoo/orm/registry.py:1103,1137` —
 processes stay consistent by writing to signalling sequences and polling them:
 
@@ -386,7 +413,12 @@ Models, controllers and a game-loop thread, all inside `odoo-bin`.
   request/response. Restarting the game restarts the web client. Under
   `--workers > 0` there are several server processes and the tick must run in
   exactly one of them, which is a coordination problem with no good answer.
-- **Verdict:** superseded by E, which is the same thing with its own lifecycle.
+- **Verdict:** superseded by E — but read §4.2 before concluding the two are far
+  apart, because E **as built** serves the web client from the same process, so
+  the deployment shapes converged after this was written. What did not converge
+  is the objection above. `game_run` *refuses* `--workers`, so the tick is never
+  one thread among several server processes; an addon loaded into a server
+  someone else started has no way to refuse anything.
 
 ### C. A separate service over RPC
 
@@ -437,13 +469,18 @@ without `stop=True` — plus `--max-cron-threads=0` so that `cron_spawn`
 threads, leaving ours as the only one. See §5.3.
 
 - **For:** every advantage of B — full ORM, real transactions, one commit
-  spanning `game_plot` and `stock_move` — **plus** its own lifecycle. Restart
-  the game without restarting Odoo. A deterministic tick that is the process's
-  main loop rather than a thread inside a web server. And the tick interval
-  becomes a knob we own (§5.3), which is what lifts `DESIGN.md` §4.3's
-  `K <= 240` ceiling.
+  spanning `game_plot` and `stock_move` — **plus** a process the game
+  configures: it forces `--max-cron-threads=0` and refuses `--workers` and an
+  unsafe `--clock-tick` (§4.2). And the tick interval becomes a knob we own
+  (§5.3), which is what lifts `DESIGN.md` §4.3's `K <= 240` ceiling.
+- **Correction to the above.** This used to claim "its own lifecycle — restart
+  the game without restarting Odoo". **That is not what was built and it is not
+  true.** `game_run` serves the web client itself, so restarting the game does
+  restart Odoo, exactly as under B. The lifecycle argument was the weakest one
+  in this list and it is the one that did not survive; the configuration
+  argument replaces it (§4.2).
 - **Against:** the contract of §2.6 — signalling on the HTTP half, the
-  `thread.dbname` edge, and concurrency against `odoo-bin` (§6.6).
+  `thread.dbname` edge (§6.7), and concurrency between the threads (§6.6).
 - **Verdict:** the recommendation.
 
 ### Summary
@@ -452,11 +489,12 @@ threads, leaving ours as the only one. See §5.3.
 |---|---|---|---|---|---|
 | ORM access | direct | direct | **direct** | round-trip | none |
 | One transaction with Odoo | yes | yes | **yes** | no | unsafe |
-| Own lifecycle / restart | no | no | **yes** | yes | yes |
-| Deterministic tick | n/a | thread in a web server | **the main loop** | yes | yes |
+| Own lifecycle / restart | no | no | **no, as built** (§3.E) | yes | yes |
+| Owns its own configuration | no | no | **yes** (§4.2) | yes | yes |
+| Deterministic tick | n/a | thread in a web server | **threads in a web server that cannot fork** (§4.3) | yes | yes |
 | Auth | free | free | free (§5.6) | bridge it | bridge it |
 | Frontend freedom | poor | full | **full** | full | full |
-| Cache signalling | free | free | **by hand (§2.6)** | n/a | broken |
+| Cache signalling | free | free | **free** — Odoo's dispatcher (§2.6) | n/a | broken |
 
 ## 4. Recommendation
 
@@ -477,8 +515,10 @@ framework or with Odoo's.
   gevent. But `check_signaling` per request (§2.6), retry on serialisation
   failure (§6.6), and session authentication (§5.6) all become ours to write,
   and each is easy to get subtly wrong.
-- **E2 — Odoo's** — a second `odoo-bin` on its own port, with the game addon
-  installed, `--max-cron-threads=0`, and the tick as the process's own loop.
+- **E2 — Odoo's** — `game_run` *is* an `odoo-bin`. It runs Odoo's serving
+  bootstrap with the game addon on the addons path, `--max-cron-threads=0`
+  forced on itself, and the clock and cron threads running beside the request
+  threads.
 
 **Recommend E2.** The three things E1 costs us are exactly the three things
 Odoo's dispatcher already does correctly, and none of them is interesting work.
@@ -488,22 +528,47 @@ not its web client.
 
 Revisit E1 if the game ever needs many concurrent websocket connections, where
 a threaded WSGI server plus gevent is genuinely the wrong shape. For a world
-with a handful of players it is not.
+with a handful of players it is not. Note that the usual answer to that load —
+`--workers` — is closed to this process (§4.2), so the ceiling arrives sooner
+than it would for an ordinary Odoo deployment.
 
 ### 4.2 What "the same process" means here, precisely
 
-The phrase is ambiguous enough to have already caused one misunderstanding, so
-to be exact. There are **two** processes:
+**Corrected.** This section used to say there were two processes, the web
+client's and the game's, and that the game deliberately did *not* share one
+with the web client. That is not what was built, and it is worth being exact,
+because the old text drew the line in the wrong place.
 
-| process | contains |
+`game_run` runs Odoo's *serving* bootstrap (§3.E), which makes it a full Odoo
+server. One process, holding everything:
+
+| thread(s) in `odoo-bin game_run -d world` | does |
 |---|---|
-| `odoo-bin` | the Odoo web client — accounting, inventory, the usual |
-| `odoo-bin game_run` | **the tick *and* the UI backend** |
+| clock | one `UPDATE` per tick — game time |
+| cron | `_process_jobs`, on game time |
+| request (many) | the game's HTTP and websocket, **and the Odoo web client** |
 
-"The UI rides in the game process" means the second row: the game loop and the
-game's HTTP endpoints are one OS process. It does **not** mean the game shares
-a process with the Odoo web client — that is option B, and it is what having a
-separate process was for.
+So the web client is on `--http-port` with no second server, you log in
+normally, and every ordinary Odoo option applies.
+
+**Then what did a separate process buy, if it hosts the web client anyway?**
+Not isolation from the web client — that framing was simply wrong. What it buys
+is that the game owns the process's *configuration*:
+
+- it forces `--max-cron-threads=0` on itself, so Odoo's own poller cannot fire a
+  cron behind the game's back;
+- it refuses `--workers`, so there is exactly one process and §3.B's
+  tick-election problem cannot arise;
+- it refuses a `--clock-tick` with no headroom under `max_gap`, which would
+  freeze the world on one late tick.
+
+An addon loaded into a server someone else launched can do none of the three. It
+can only hope the right flags were passed. *That* is the durable argument for E
+over B, and it is not the one this document originally gave.
+
+**A second server is possible and rarely wanted.** For prefork HTTP under a
+heavier UI, run a plain `odoo-bin` against the same world with
+`--max-cron-threads=0`; §6.8 has what it costs.
 
 ### 4.3 That process is multi-threaded, and has to be
 
@@ -520,7 +585,7 @@ runs three kinds of thread:
 |---|---|---|
 | clock | the one-statement `UPDATE`, on a short interval | anything |
 | cron | `_process_jobs` | — (it *is* the slow one) |
-| request (many) | the UI's HTTP and websocket | either of the above |
+| request (many) | the UI's HTTP and websocket, and the web client | either of the above |
 
 This is worth stating plainly because it looks like the "complexity" that
 counted against running the game as a thread inside the web server (§3.B) — but
@@ -533,6 +598,15 @@ this process has.
 It does mean E1's "single async loop" framing was never really on the table:
 whatever serves HTTP here is concurrent with a tick that blocks.
 
+**Threads yes, processes no — and this was measured, not assumed.** `game_run`
+refuses `--workers` outright (`loop.unsupported_workers_error`). A prefork
+master forks its HTTP workers *after* the clock and cron threads have started
+and opened database connections; the children inherit those sockets without
+owning them, and the psycopg2 cursors come apart on both sides — observed as
+`cursor already closed` on the clock read itself. Threaded mode is the supported
+shape, and the refusal is what keeps §3.B's objection from quietly reappearing
+inside option E.
+
 ## 5. Design
 
 ### 5.1 Layout
@@ -544,22 +618,26 @@ proposal of `odoo_sim/addons/game/` is superseded:
 odoo_sim/
   DESIGN.md            game clock
   UI_DESIGN.md         this document
-  ui/                  the frontend source tree, its own package.json
+  README.md            how to run a world
+  ui/                  the frontend source tree, its own package.json  <- to build
 
 addons/odoo_sim/       depends: base, bus
+  loop.py              GameLoop: the clock and cron threads, and the refusals
   pulse.py             CHANNEL / TYPE / payload() / send()   (5.6)
-  cli/game_run.py      clock thread + cron thread + serving bootstrap
+  cli/game_run.py      argument parsing + the serving bootstrap
   cli/sim_pause.py     pause / resume
-  tests/test_pulse.py  5 tests
+  tests/test_loop.py   14 tests
+  tests/test_pulse.py  6 tests
   models/              game state (Odoo models)          <- to build
   controllers/main.py  the page + the json2 API          <- to build
-  static/dist/         vite build output, served raw (2.1)
+  static/dist/         vite build output, served raw (2.1)   <- to build
 ```
 
-`pulse.py` sits beside the CLI rather than inside it deliberately: the pulse is
-a module the UI backend imports, and reaching it through a `Command` subclass
-would have made testing it require loading a CLI module. Import it as
-`from odoo.addons.odoo_sim import pulse`.
+`pulse.py` and `loop.py` sit beside the CLI rather than inside it deliberately:
+the pulse is a module the UI backend imports, and reaching either through a
+`Command` subclass would have made testing it require loading a CLI module.
+`cli/game_run.py` is argument parsing and bootstrap; everything worth a test is
+below it. Import as `from odoo.addons.odoo_sim import pulse`.
 
 I had argued for keeping it out of `addons/` to protect the fork's rebase, and
 that argument does not survive contact: `addons/odoo_sim/` is a *new directory*,
@@ -577,18 +655,18 @@ command discovery reads the addons path, not the database. Installation only
 matters once the game has models of its own, which is the point at which the UI
 work begins.
 
-Two processes, one database:
+**Corrected: one process, one database.** This section used to show two servers
+on two ports. `game_run` serves the web client itself (§4.2), so the whole
+deployment is:
 
 ```bash
-# the Odoo web client — accounting, inventory, the usual
-odoo-bin -d world --max-cron-threads=0
-
-# the game: tick + UI backend
-odoo-bin game_run -d world --http-port=8070 --max-cron-threads=0
+odoo-bin game_run -d world
 ```
 
-`--max-cron-threads=0` on **both**: the first so the web server never fires a
-cron behind the game's back, the second because the tick does it itself.
+The clock, the crons, the game's endpoints and the Odoo web client are all on
+`--http-port` (8069 by default). Do **not** pass `--max-cron-threads=0`:
+`game_run` forces it on itself, and the old two-process advice to pass it on
+both survives only for the optional second server of §6.8.
 
 ### 5.2 The game's own state: Odoo models, not raw tables
 
@@ -615,10 +693,18 @@ and must not lean on the magic ones.
 
 ### 5.3 The loop
 
-`odoo/service/server.py:542-610` is the reference implementation, and the
-game's version is strictly simpler: one database, so no `cron_database_list()`,
-no `postgres` connection, and none of the thundering-herd jitter that exists
-only to spread several workers apart.
+**Built**, as `loop.GameLoop`. `odoo/service/server.py:542-610` was the
+reference implementation, and the game's version is simpler: one database, so no
+`cron_database_list()` and none of the thundering-herd jitter that exists only
+to spread several workers apart.
+
+**One simplification this section claimed does not survive.** It said the game
+needs "no `postgres` connection". It does. `ir_cron._notifydb` issues its
+`NOTIFY cron_trigger` on the **`postgres`** database with the world's name as
+the payload (`ir_cron.py:798-803`), because `NOTIFY` does not cross databases —
+so that is where a `_trigger()` shows up, and the cron thread has to `LISTEN`
+there or event-driven crons wait out the tick. Having one world only means the
+payload never has to be filtered, not that the connection can go.
 
 This is the **cron** thread specifically. The clock thread is separate and
 deliberately shares nothing with it (§4.3), because a cron holding this loop
@@ -626,12 +712,18 @@ for ten real seconds must not be able to delay the clock past `max_gap`. That
 thread is short enough to give in full:
 
 ```python
-while True:
-    with registry.cursor() as cr:
-        clock = game_clock.tick(cr)          # the whole clock thread
-    publish_pulse(clock)                     # §5.6
-    time.sleep(CLOCK_INTERVAL)               # < max_gap
+while not self._stop.wait(self.clock_tick):          # clock_tick < max_gap
+    with odoo.sql_db.db_connect(self.dbname).cursor() as cr:
+        clock = game_clock.tick(cr)                  # the whole clock thread
+        pulse.send(cr, clock)                        # §5.6
+        cr.commit()                                  # ...which publishes it
 ```
+
+Note that the pulse is queued on **the tick's own transaction**, not sent after
+it. `bus.bus._sendone` writes its row at precommit and issues the `NOTIFY` at
+postcommit (`bus.py:121-166`), so the commit above is what publishes. An earlier
+draft of this block published after the cursor closed, which would have made the
+tick and its announcement two transactions that can disagree.
 
 `game_clock.tick` is also crash recovery: the statement clamps its own elapsed
 term, so a restart after a kill or a suspend is an ordinary tick that happens
@@ -643,16 +735,38 @@ instead of waiting out the tick. It is started by `game_run` after
 `server.start(preload=[db])` has brought the server up:
 
 ```python
-cr.execute("LISTEN cron_trigger")
-cr.commit()
-while True:
-    select.select([cr._cnx], [], [], TICK_SECONDS)
-    cr._cnx.poll()
-    cr._cnx.notifies.clear()
-
-    IrCron._process_jobs(db_name)              # signalling handled inside (2.6)
-    threading.current_thread().dbname = db_name  # _process_jobs deleted it (2.6)
+with closing(odoo.sql_db.db_connect('postgres').cursor()) as cr:   # not the world
+    cr.execute("SELECT pg_is_in_recovery()")
+    if not cr.fetchone()[0]:                   # a replica cannot LISTEN
+        cr.execute("LISTEN cron_trigger")
+    cr.commit()
+    while not self._stop.is_set():
+        select.select([cr._cnx], [], [], self.cron_tick)
+        cr._cnx.poll()
+        cr._cnx.notifies.clear()               # one world: nothing to filter
+        self.run_cron_tick()
 ```
+
+```python
+def run_cron_tick(self):                       # the part with the sharp edges
+    thread = threading.current_thread()
+    thread.start_time = time.time()            # opt into the watchdog, below
+    try:
+        IrCron._process_jobs(self.dbname)      # signalling handled inside (2.6)
+    except Exception:
+        _logger.warning("cron: tick failed", exc_info=True)
+    finally:
+        thread.start_time = None
+        thread.dbname = self.dbname            # _process_jobs deleted it (2.6)
+```
+
+`_process_jobs` deletes `thread.dbname` from its own `finally`, so it is gone
+whether the job raised or not, and the restore has to be equally unconditional.
+The broad `except` above would already guarantee that, which makes the `finally`
+redundant *today* — it is there so the guarantee does not quietly depend on the
+`except` staying broad. A narrowed `except` and a restore on the happy path
+would leave the loop stamping **real** time from the first failure onward, and
+it would keep running and keep firing crons while doing it (§6.7).
 
 **The thread must opt into the watchdog.** `process_limit`
 (`server.py:509-535`) enforces `limit_time_real_cron` on threads, but only
@@ -675,7 +789,14 @@ server is actually running.
 `SLEEP_INTERVAL = 60` (`server.py:68`), which is where `DESIGN.md` §4.3's
 `K <= 240` ceiling came from: scheduling jitter is `TICK * K` game seconds.
 
-| `TICK` | `K = 60` | `K = 240` | `K = 1440` |
+As shipped this is **two** flags, not one — `--clock-tick` and `--cron-tick`,
+both defaulting to 1.0 real seconds — because §4.3 split the threads. The table
+below is `--cron-tick`, the one that sets cron resolution. `--clock-tick` is
+bounded from the other side: `game_run` refuses a value that leaves no headroom
+under the world's `max_gap`, since a single late tick would otherwise freeze the
+clock under every reader.
+
+| `--cron-tick` | `K = 60` | `K = 240` | `K = 1440` |
 |---|---|---|---|
 | 60 s (Odoo's default) | 1 game hour | 4 game hours | 1 game day |
 | 5 s | 5 game min | 20 game min | 2 game hours |
@@ -980,8 +1101,36 @@ extra signal to do it:
 
 Only death is silent. A lock-on-silence therefore cannot misfire on a
 deliberate pause, and "paused" and "lost contact" are distinguishable at the
-mechanism level rather than needing to be guessed at in the UI. What remains is
-purely how each should *look* and what each should still allow (§9).
+mechanism level rather than needing to be guessed at in the UI.
+
+#### Paused and locked must not look alike — decided
+
+The mechanism keeps them apart; **the UI has to keep them apart too.** They are
+the same fact about input — no writes — and opposite facts about everything
+else:
+
+| | paused | locked |
+|---|---|---|
+| what it is | a state the player **chose** | an **error**: the loop is gone |
+| how it was reached | `sim_pause`, deliberately | nothing arrived for `max_gap` |
+| what the player should feel | in control | told something is wrong |
+| the way out | resume — the player's own | out of the page's hands |
+| clock | frozen, and *says* it is frozen | frozen, and not to be trusted |
+
+Concretely: paused reads as a deliberate hold — the world is fine and waiting.
+Locked reads as a fault, names what is wrong ("lost contact with the world"),
+and must not offer a resume affordance, because resuming is not what is broken
+and `sim_pause --resume` would not fix it.
+
+The failure to avoid is a single greyed-out overlay serving both, which teaches
+the player that the game freezing is normal — at which point a dead loop looks
+exactly like a coffee break, and the silent divergence described two sections
+below accumulates unnoticed. That is the whole reason the pulse distinguishes three states at all;
+collapsing them in the UI throws the mechanism away.
+
+What a paused world still *allows* — planning, inspecting, queueing — is a game
+question and stays open (§9.1). Both states refuse writes that assume time
+passes; that much is settled here and enforced below.
 
 #### The lock threshold: count silence, do not compare clocks
 
@@ -1041,7 +1190,8 @@ if not game_clock.is_running(game_clock.clock_for(request.db, request.env.cr)):
 `is_running` returns `True` for a database that is not a game world at all,
 which means the guard can sit on a shared write path without breaking ordinary
 Odoo. It covers `paused` as well as a dead loop — the browser should treat
-those as *different states with the same effect on input* (§9).
+those as *different states with the same effect on input*, which is exactly the
+split decided above.
 
 The UI lock is the user experience; this is the guarantee.
 
@@ -1056,14 +1206,16 @@ env['bus.bus']._sendone(channel, 'game.event', payload)
 
 Client side, a raw `WebSocket` to `/websocket` and one subscribe frame. No Odoo
 JavaScript, no SharedWorker. Because the bus fans out through `NOTIFY imbus`
-(§2.4), it does not matter which of the two processes sent it.
+(§2.4), it does not matter which process sent it — which stops being a
+theoretical convenience only if the optional second server of §6.8 exists.
 
-**Authentication.** Under E2 the player is an Odoo user, `auth='user'`, and the
-session cookie carries — but the two processes must share the session store, or
-a login on `:8069` will not be recognised on `:8070`. Point both at the same
-`--data-dir`. This is the one piece of two-process plumbing that has no
-equivalent in a single-process design, and it will present as "the game always
-redirects me to the login page".
+**Authentication.** The player is an Odoo user, `auth='user'`, and the session
+cookie carries. **Corrected:** this used to warn that the two processes must
+share a session store or a login on `:8069` would not be recognised on `:8070`.
+With one process (§4.2) there is one session store and one origin, so there is
+nothing to do. The warning survives only for the optional second server of §6.8,
+where it is still true and still presents as "the game always redirects me to
+the login page".
 
 If the game later wants its own accounts, decoupled from `res.users`, that is
 an `auth='public'` route plus a game-side session — no reason to do it before
@@ -1071,12 +1223,21 @@ there is a second player.
 
 ### 5.7 The dev loop
 
+**The stack is Vite and vanilla JavaScript — decided.** No React, no Vue, no
+OWL. Milestone 1 is a clock, a connection and three states; a framework earns
+its place when there is shared mutable state across many components, and there
+is none yet. Vite is there for the dev server, the proxy and the hashed build
+(below), all of which are wanted on day one, and none of which imply a
+framework. Whether the *renderer* eventually wants a library is a separate
+question and still open (§9.3) — a canvas or WebGL renderer would not be
+served by a DOM framework anyway.
+
 **Development.** Vite on `:5173`, proxying `/game/api`, `/websocket` and
-`/web/session` to the game process on `:8070`. The browser talks only to Vite,
+`/web/session` to the game process on `:8069`. The browser talks only to Vite,
 so there is no CORS to configure and the session cookie is same-origin. HMR is
 untouched by anything Odoo does.
 
-**Production.** `vite build` into `odoo_sim/addons/game/static/dist/`, served
+**Production.** `vite build` into `addons/odoo_sim/static/dist/`, served
 raw (§2.1). Filenames must be content-hashed — `STATIC_CACHE` is seven days
 (`odoo/http.py:334`) and the response carries it, so an unhashed `main.js` will
 be stale in every browser that has seen it. Vite hashes by default; the point
@@ -1151,9 +1312,18 @@ part of the clock design the UI owns rather than inherits.
 ### 6.4 Two toolchains
 
 An `npm` build joins the repo. Keep the boundary sharp: the addon is Python and
-consumes `static/dist/` as an opaque artefact; the frontend is TypeScript and
+consumes `static/dist/` as an opaque artefact; the frontend is JavaScript and
 consumes the API as an opaque contract. When debugging the *game*, the tool is
 `odoo-bin shell`, not the browser.
+
+**Vanilla JS, not TypeScript** (§5.7) — this section previously assumed the
+latter. The trade is real and worth naming rather than pretending it away: the
+payload of §5.5 is the one place a type would have earned its keep, since every
+field of it is load-bearing and three of them are datetimes with a parsing trap
+attached. What replaces the type is the round-trip test — `test_pulse.py`
+rebuilds a clock from the payload and asserts it reproduces `game_at()`, and the
+frontend is to run the same assertion against a captured payload (§7). If the
+payload grows past a handful of fields, revisit.
 
 ### 6.5 The transpiler gate is a path convention
 
@@ -1161,36 +1331,64 @@ consumes the API as an opaque contract. When debugging the *game*, the tool is
 will rewrite it into an Odoo module and break it. `static/dist/` by convention,
 with no enforcement behind it.
 
-### 6.6 Two processes contend for the same rows — new
+### 6.6 Concurrent writers contend for the same rows — corrected
 
-The web client and the game now write the same tables concurrently. PostgreSQL
-answers that with serialisation failures and deadlocks, and they will appear
-under load in a way they never did with one process.
+This was written as "two processes contend", and with one process (§4.2) that
+framing is wrong. The contention is not: it just moved inside, and the writers
+are **threads**, not processes. The clock thread writes `game_clock` every
+second; the cron thread writes business rows for as long as a job takes; every
+request thread writes whatever the player just did. PostgreSQL answers
+concurrent writers with serialisation failures and deadlocks whether or not
+they share an address space.
 
 Odoo's own dispatcher already retries them (`service/model.py`), which is a
-substantial part of the argument for E2 over E1 (§4.1). The tick is covered
-too: `_process_jobs_loop` catches `TransactionRollbackError` per job and skips
-(`ir_cron.py:226-228`). What is *not* covered is any long-running game logic we
-write that holds rows across a slow section — that is ours to keep short.
+substantial part of the argument for E2 over E1 (§4.1). The cron thread is
+covered too: `_process_jobs_loop` catches `TransactionRollbackError` per job and
+skips (`ir_cron.py:226-228`). The clock thread is covered by being trivial — one
+`UPDATE` of one row, committed immediately, holding nothing.
 
-### 6.7 `_process_jobs` deletes the thread's database — new
+What is *not* covered is any long-running game logic we write that holds rows
+across a slow section — that is ours to keep short. And running the optional
+second server of §6.8 restores the original cross-process version of this risk
+on top.
+
+### 6.7 `_process_jobs` deletes the thread's database — fixed, and tested
 
 §2.6. A game loop that sets `thread.dbname` once at startup loses it after the
 first tick, and the clock silently falls back to real time unless
 `config['db_name']` names exactly one database.
 
-Two mitigations, and we should take both: always run the process with
-`-d <db>` so the fallback resolves, **and** re-set `thread.dbname` after each
-`_process_jobs` call (§5.3). The failure mode is a world whose clock quietly
-stops accelerating, which is not something a test would catch unless it is
-looking for it.
+Both mitigations were taken: the process runs with `-d <db>` so the fallback
+resolves, **and** `run_cron_tick` re-sets `thread.dbname` in a `finally` after
+every `_process_jobs` call (§5.3). It has a test of its own, and it needed one —
+the failure mode is a world that keeps running, keeps firing crons, reports
+nothing, and stamps real time into every record. Nothing about it looks like an
+error; the clock simply stops accelerating.
 
-### 6.8 A second `odoo-bin` needs its own ports and its own session store — new
+The test asserts against `threading.current_thread()` rather than an injected
+object, deliberately: `_process_jobs` reaches for the running thread itself, so
+a test built on a stand-in would pass whether or not the real restore happened.
 
-`--http-port` obviously; `--gevent-port` too, if either process runs prefork.
-And `--data-dir` must be *shared*, not separate, or sessions do not carry
-between the two (§5.6). The two requirements pull in opposite directions and
-are easy to get backwards.
+### 6.8 A second `odoo-bin` is optional — corrected
+
+This was a standing requirement; it is now an opt-in. `game_run` serves the web
+client itself (§4.2), so the ordinary deployment is one process and none of the
+below applies to it.
+
+You would add a second server for one reason: prefork HTTP, which `game_run`
+refuses for itself (§4.3). Start it against the same world with
+`--max-cron-threads=0`, or it polls crons on its own schedule and the game loop
+is no longer the only thing driving the world:
+
+```bash
+odoo-bin -d world --max-cron-threads=0 --workers=4 --http-port=8070
+```
+
+Then the old warning applies, and both halves of it are easy to get backwards:
+**ports must differ** (`--http-port`, and `--gevent-port` too since this one is
+prefork), while **`--data-dir` must be shared**, or sessions do not carry and
+the game redirects to the login page forever (§5.6). Adding this server also
+brings back the cross-process form of §6.6.
 
 ### 6.9 Reconnection is a resync, not a replay — new
 
@@ -1210,16 +1408,21 @@ works, the window matters much less.
 
 ### 6.10 What is and is not covered by tests
 
-Narrowed — the pulse is now tested, so this is no longer the blanket gap it was
-one revision ago.
+Narrowed again — the loop's bookkeeping is now tested too.
 
-**Covered:** `odoo/game_clock.py` (27 tests, green against both a game world and
-an ordinary database) and `addons/odoo_sim/pulse.py` (5 tests), including the
-one the lock depends on — that a pulse is *still sent while paused*.
+**Covered:** `odoo/game_clock.py` and `sim_init` (32 tests, green against both a
+game world and an ordinary database), `addons/odoo_sim/pulse.py` (6 tests),
+including the one the lock depends on — that a pulse is *still sent while
+paused* — and `addons/odoo_sim/loop.py` (14 tests): the three refusals
+(`--clock-tick` headroom, `--workers`, the retention warning), the watchdog
+tagging, and the `thread.dbname` restore across a normal tick, many ticks, and a
+*failing* job.
 
-**Not covered:** the loop's threading and the two CLI commands, verified by
-running a world rather than by a suite. That is real evidence, but a regression
-in the clock thread's timing or its shutdown behaviour would not be caught.
+**Not covered:** the threading itself — tick cadence, the `select`/`LISTEN`
+wiring, and the bootstrap in `game_run.run()`. The split matters: what is tested
+is what the loop *decides*, made reachable without starting a thread; what is
+not is whether the threads run on time. A clock thread that stalled or drifted
+would still emit well-formed pulses and pass every test above.
 
 For the UI the residual risk is narrow and worth naming: the pulse's *contents*
 are tested, its *cadence in a live loop* is not. A clock thread that stalls or
@@ -1232,25 +1435,28 @@ is over-engineering.
 
 Deliberately no gameplay. The point is to exercise the whole spine end to end:
 
-1. `odoo_sim/addons/game/__manifest__.py` — depends on `base`, `bus`.
-2. `cli/game_run.py` — `server.start(preload=[db])` with
-   `--max-cron-threads=0`, serving HTTP on its own port, plus the loop of §5.3
-   in its own thread (§4.3).
+1. ~~`__manifest__.py`~~ — **done**, as `addons/odoo_sim/`, depending on `base`
+   and `bus`.
+2. ~~`cli/game_run.py`~~ — **done**, and it went further than this line
+   expected: `server.start(preload=[db])` with `--max-cron-threads=0` forced on
+   itself, serving the web client on the ordinary `--http-port`, with the clock
+   and cron threads split (§4.3) rather than one loop thread.
 3. `controllers/main.py` — `GET /game` renders the page; `GET /game/api/clock`
-   returns the basis of §5.5.
+   returns the basis of §5.5. **To build.**
 4. ~~The pulse~~ — **done**, and to this spec: `odoo_sim.pulse` on
    `odoo_sim.world`, every tick, all seven fields, verified on a live world.
-5. `views/index.xml` — the minimal standalone template (§5.7).
-6. `odoo_sim/ui/` — Vite project; subscribe, interpolate with
+5. `views/index.xml` — the minimal standalone template (§5.7). **To build.**
+6. `odoo_sim/ui/` — Vite project, vanilla JS (§5.7); subscribe, interpolate with
    `requestAnimationFrame`, and render the three states of §5.6 — live, paused,
-   locked.
-7. Tests, added to the suite that now exists in `addons/odoo_sim/tests/` — the
-   pulse's own five are written (§6.10), so what milestone 1 owes is the UI's
-   half:
+   locked, with paused and locked visually distinct. **To build.**
+7. Tests, added to the suite in `addons/odoo_sim/tests/` — twenty are written
+   (§6.10), so what milestone 1 owes is the UI's half:
    - the clock endpoint agrees with the `game_clock` row;
    - the JS parses a payload whose microseconds are zero (§5.5);
-   - the clock still returns game time *after* a tick has run (§6.7);
-   - a write endpoint refuses when `is_running` is false.
+   - ~~the clock still returns game time *after* a tick has run~~ — **done**,
+     `test_the_clock_still_reads_game_time_after_a_tick` (§6.7);
+   - a write endpoint refuses when `is_running` is false;
+   - the JS reproduces `game_at()` from a captured payload (below).
 
    Run with `odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim
    --stop-after-init`.
@@ -1282,16 +1488,19 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 
 | Question | Decision |
 |---|---|
-| Where does the game run? | **A separate process that embeds the ORM** (§3.E). Own lifecycle and a deterministic main loop, without giving up transactions. |
+| Where does the game run? | **A process that embeds the ORM**, launched as its own command (§3.E). A deterministic tick without giving up transactions. |
 | Is that not the option you rejected? | **No.** The objection to C was RPC, not processes. Embedding the ORM keeps one commit across game and business tables (§3.C). |
-| How does that process serve HTTP? | **Odoo's dispatcher**, a second `odoo-bin` on its own port (§4.1). Signalling, retry and session auth are already correct there. |
-| Which two things share a process? | **The tick and the UI backend** — not the game and the web client (§4.2). |
+| How does that process serve HTTP? | **Odoo's dispatcher** (§4.1). Signalling, retry and session auth are already correct there. |
+| How many processes, then? | **One.** `game_run` is a full Odoo server and hosts the web client too (§4.2). A second `odoo-bin` is optional and only buys prefork HTTP (§6.8). |
+| What did the separate command buy, if not isolation? | **Control of its own configuration** — it forces `--max-cron-threads=0`, refuses `--workers`, and refuses a `--clock-tick` with no headroom. An addon in someone else's server can do none of those (§4.2). |
+| Can it run prefork? | **No, and it refuses to.** A prefork master forks HTTP workers out from under the clock and cron threads and takes their connections apart — measured, not feared (§4.3). |
 | Serving or non-serving bootstrap? | **Serving**: `server.start(preload=[db])` *without* `stop=True`, which serves nothing (§3.E). |
 | One thread or several? | **Several, necessarily.** A blocking cron would otherwise stall every UI request for ten real seconds (§2.8, §4.3). |
-| Where does the entry point live? | **`game/cli/game_run.py`** inside the addon — addons can ship CLI commands, so the core diff stays at zero (§2.7). |
-| What drives the crons? | **The game loop**, `IrCron._process_jobs` on each tick, with `LISTEN cron_trigger` so triggers still fire immediately (§5.3). |
-| What sets the game's time resolution? | **The tick interval**, replacing `SLEEP_INTERVAL = 60`. This is what lifts `DESIGN.md`'s `K <= 240` ceiling (§5.3). |
+| Where does the entry point live? | **`addons/odoo_sim/cli/game_run.py`** — addons can ship CLI commands, so the core diff stays at zero (§2.7). The behaviour worth testing lives below it in `loop.py` (§5.1). |
+| What drives the crons? | **The game loop**, `IrCron._process_jobs` on each tick, with `LISTEN cron_trigger` on the **`postgres`** database so triggers still fire immediately (§5.3). |
+| What sets the game's time resolution? | **`--cron-tick`**, replacing `SLEEP_INTERVAL = 60`. This is what lifts `DESIGN.md`'s `K <= 240` ceiling (§5.3). |
 | Odoo's asset pipeline, or our own build? | **Our own**, into `static/dist/`. Served raw and untranspiled (§2.1). |
+| Which frontend stack? | **Vite and vanilla JavaScript.** No React, no Vue, no OWL — nothing yet needs one, and a renderer would not want a DOM framework anyway (§5.7, §6.4). |
 | Game state as Odoo models, or raw tables? | **Odoo models.** Migrations, constraints and shared transactions (§5.2). |
 | Which dispatcher? | **`json2`** — plain JSON in and out, real status codes (§2.3). |
 | How does the client know the time? | **It fetches a basis and interpolates**, refreshing the basis from the pulse. Fetching is fine; fetching at frame rate is not (§5.5). |
@@ -1300,28 +1509,33 @@ loop; and an endpoint that writes, to prove the transaction story of §4.
 | What happens when the pulse stops? | **The UI locks**, at a threshold of `max_gap`, so it stops exactly when the world does (§5.6). |
 | How is that silence measured? | **Monotonic elapsed since the last pulse arrived** — never a local wall clock against `last_tick_real`, which a skewed client gets wrong in both directions (§5.6). |
 | Does locking mean freezing the clock? | **No — it means refusing actions.** A dead loop still accepts writes it can never process (§5.6). |
+| Should paused and locked look alike? | **No.** Paused is a state the player chose and offers a way out; locked is an error, names the fault, and offers no resume. One shared grey overlay teaches the player that freezing is normal (§5.6). |
 | Is the lock enough in the browser? | **No.** Write paths call `game_clock.is_running(...)`; the browser lock is UX, that is the guarantee (§5.6). |
 | What does a reconnecting client do? | **Resync, never replay.** The bus's catch-up window is ~60 real seconds at `K = 1440` (§2.4.1, §6.9). |
 | How do state changes reach the client? | **`bus.bus._sendone`** and a raw WebSocket; it crosses processes via `NOTIFY imbus` (§2.4). Same channel as the pulse. |
-| Who is the player? | **An Odoo user**, `auth='user'`, with a shared `--data-dir` (§5.6). |
+| Who is the player? | **An Odoo user**, `auth='user'`. With one process there is one session store and nothing to configure; `--data-dir` only has to be shared if the optional second server exists (§5.6, §6.8). |
 
 ## 9. Open questions
 
-1. **What should paused and locked each look like, and what should paused still
-   allow?** The mechanism no longer leaves this ambiguous — pause is not silence
-   (§5.6), so the client can tell live, paused and dead apart with certainty.
-   What is left is genuinely a game question: both states must refuse writes that
-   assume time passes, but "paused" is a state the player chose and "lost
-   contact" is a fault, so they should not look alike or offer the same way out.
-   Whether a paused world still allows planning, inspecting or queueing is the
-   first real *design* question this work runs into, as opposed to a plumbing
-   one. *(Pausing itself is settled: `DESIGN.md` §3.3.)*
-2. **Whether the web-client process is needed at all in the long run.** Right
-   now it is how you inspect state and how the business side is operated. If
-   the game UI eventually covers everything, the second process becomes a
-   development tool rather than part of the deployment.
+1. **What should a paused world still allow?** *Narrowed.* That paused and
+   locked must not look alike is decided (§5.6, §8): paused is chosen and offers
+   a way out, locked is a fault and does not. Both refuse writes that assume
+   time passes. What is still open is the rest of the surface — whether a paused
+   world lets the player plan, inspect, or queue an action to run on resume.
+   That is the first real *game*-design question this work reaches, as opposed
+   to a plumbing one, and queueing in particular is a bigger commitment than it
+   looks: it needs somewhere to hold an intent that is not yet a record.
+   *(Pausing itself is settled: `DESIGN.md` §3.3.)*
+2. **Whether the Odoo web client is wanted in the long run.** *Reframed —* it is
+   no longer a second process to retire (§4.2), just a UI served alongside the
+   game's on the same port. Right now it is how you inspect state and operate
+   the business side. If the game UI eventually covers everything, what is left
+   is whether to keep serving it at all, which is a `--load` question rather than
+   a deployment one.
 3. **Which renderer.** Pixi, Phaser or plain canvas — not decidable until there
-   is something to draw, and milestone 1 does not depend on it.
+   is something to draw, and milestone 1 does not depend on it. Note that the
+   vanilla-JS decision (§5.7) does not prejudge this: it rules out a *DOM*
+   framework, and a renderer is not one.
 4. **How much game state is game state.** Every field is a choice between a
    `game.*` model and an existing Odoo field. Wrong in one direction the game
    reimplements Odoo; wrong in the other it contorts business records to hold
