@@ -19,12 +19,16 @@
             // WebsocketConnectionHandler._VERSION in addons/bus/websocket.py.
             // Get the first two wrong and the clock silently never moves; get
             // the last wrong and the page says the server has been updated.
-            // No `clock`: the page fetches one on start.
+            // `changed_type` must match CHANGED in models/game_world.py, or
+            // the world only updates when the player acts or reconnects.
+            // No `clock` and no `world`: the page fetches both on start.
             window.odooSim = {
                 channel: 'odoo_sim.world',
                 type: 'odoo_sim.pulse',
+                changed_type: 'odoo_sim.world_changed',
                 websocket_version: '19.0-2',
                 clock: null,
+                world: null,
             };
         </script>
     </head>

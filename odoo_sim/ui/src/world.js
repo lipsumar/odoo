@@ -5,6 +5,10 @@
  * reading.  While it is not -- before it first opens, and after it drops --
  * `GET /game/api/clock` is.  See UI_DESIGN.md 5.4.
  *
+ * The same socket carries the notice that the world's *state* changed
+ * (GAME_STATE.md 8).  That notice is empty, so all this does with it is call
+ * `onChanged`; fetching the state is the caller's business.
+ *
  * Everything the browser provides is passed in, so that the tests can drive a
  * socket and a fetch by hand.
  */
@@ -29,6 +33,10 @@ const RETRY_MAX_MS = 15000;
  *
  * `onReading(reading)` is called with each new `readClock` reading.
  *
+ * `onChanged()` is called for every `changedType` notice, and whenever the
+ * socket (re)opens: notices sent while it was down are gone, so a connection
+ * is a resync of the state as much as of the clock.
+ *
  * `onLink(state)` is called as the connection changes, with one of:
  *
  * - `live`: the socket is open and subscribed;
@@ -42,7 +50,9 @@ const RETRY_MAX_MS = 15000;
  * The last two are terminal.  Retrying either could only fail the same way
  * again, and would do it every fifteen seconds for as long as the tab is open.
  */
-export function watchWorld({ socketUrl, channel, type, fetchClock, onReading, onLink, WebSocket }) {
+export function watchWorld({
+    socketUrl, channel, type, changedType, fetchClock, onReading, onChanged = () => {}, onLink, WebSocket,
+}) {
     let socket = null;
     let retries = 0;
     let timer = null;
@@ -82,6 +92,7 @@ export function watchWorld({ socketUrl, channel, type, fetchClock, onReading, on
                 data: { channels: [channel], last: 0 },
             }));
             link('live');
+            onChanged();
         });
         ws.addEventListener('message', (event) => receive(event.data));
         // Not `error`: a browser always follows `error` with `close`, so
@@ -99,6 +110,8 @@ export function watchWorld({ socketUrl, channel, type, fetchClock, onReading, on
                 // Only a pulse proves the whole path works; an `open` alone
                 // does not, since the server may close straight after it.
                 retries = 0;
+            } else if (message.type === changedType) {
+                onChanged();
             }
         }
     }

@@ -6,6 +6,7 @@ import { watchWorld } from '../src/world.js';
 
 const CHANNEL = 'odoo_sim.world';
 const TYPE = 'odoo_sim.pulse';
+const CHANGED = 'odoo_sim.world_changed';
 
 /** A clock payload, as `pulse.payload` builds it. */
 function payload(gameNow, extra = {}) {
@@ -84,6 +85,7 @@ const UTC = {
 
 let sockets;
 let readings;
+let changes;
 let links;
 let fetches;
 let fetchClock;
@@ -95,6 +97,7 @@ beforeEach(() => {
     mock.method(console, 'warn', () => {});
     sockets = [];
     readings = [];
+    changes = 0;
     links = [];
     fetches = 0;
     fetchClock = async () => answer(200, payload('2030-03-01T09:00:00.000000'));
@@ -112,11 +115,13 @@ function watch() {
         socketUrl: 'ws://odoo.test/websocket?version=19.0-2',
         channel: CHANNEL,
         type: TYPE,
+        changedType: CHANGED,
         fetchClock: () => {
             fetches += 1;
             return fetchClock();
         },
         onReading: (reading) => readings.push(reading),
+        onChanged: () => { changes += 1; },
         onLink: (link) => links.push(link),
         WebSocket: FakeSocket,
     });
@@ -173,6 +178,31 @@ test('every pulse in a frame is applied, in order, and nothing else is', async (
         '2030-03-01T09:30:00.000Z',
         '2030-03-01T09:54:00.000Z',
     ]);
+});
+
+test('a world-changed notice is passed on, and is not a clock reading', async () => {
+    const socket = watch();
+    await settle();
+    socket.serverOpen();
+    const before = changes;
+    readings.length = 0;
+    socket.serverSend(frame({ type: CHANGED, payload: {} }, { type: CHANGED, payload: {} }));
+
+    assert.equal(changes - before, 2);
+    assert.deepEqual(readings, []);
+});
+
+test('every connection resyncs the world, since notices sent while down are gone', async () => {
+    const first = watch();
+    await settle();
+    first.serverOpen();
+    assert.equal(changes, 1);
+
+    first.serverClose(1006);
+    await settle();
+    mock.timers.tick(1000);
+    sockets.at(-1).serverOpen();
+    assert.equal(changes, 2);
 });
 
 test('a fetch that a pulse overtook is thrown away', async () => {
