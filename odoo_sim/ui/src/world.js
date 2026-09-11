@@ -6,7 +6,7 @@
  * `GET /game/api/clock` is.  See UI_DESIGN.md 5.4.
  *
  * The same socket carries the notice that the world's *state* changed
- * (GAME_STATE.md 8).  That notice is empty, so all this does with it is call
+ * (GAME_STATE.md 10).  That notice is empty, so all this does with it is call
  * `onChanged`; fetching the state is the caller's business.
  *
  * Everything the browser provides is passed in, so that the tests can drive a

@@ -1,7 +1,7 @@
 /**
  * The game page's entry point: the world clock, kept current by the pulse,
  * and the world under it, kept current by the notices that it changed.
- * See UI_DESIGN.md 5.4 and GAME_STATE.md 8.
+ * See UI_DESIGN.md 5.4 and GAME_STATE.md 10.
  *
  * Its name is spelled in `controllers/main.py` (`ENTRY`) too, which finds the
  * built file through Vite's manifest by this path.  Move it and update both.
@@ -44,6 +44,10 @@ const renderWorld = createWorldView(worldRoot, {
     accept: (shipmentId) => perform(
         `shipment:${shipmentId}`,
         () => send('POST', `/game/api/shipments/${shipmentId}/accept`, {}),
+    ),
+    ship: (orderId) => perform(
+        `order:${orderId}`,
+        () => send('POST', `/game/api/customer_orders/${orderId}/deliver`, {}),
     ),
 });
 

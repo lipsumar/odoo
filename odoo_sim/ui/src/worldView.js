@@ -1,6 +1,7 @@
 /**
- * The world on the page: what exists, what the workstations are doing, and
- * what is at the door.  See GAME_STATE.md 8.
+ * The world on the page: the company's money, what exists, what the
+ * workstations are doing, what customers want, and what is at the door.  See
+ * GAME_STATE.md 7, 8 and 10.
  *
  * As with the clock, `describeWorld` is the whole of the decision and touches
  * no DOM; `createWorldView` writes its answer into elements it keeps, rather
@@ -12,11 +13,23 @@ import { parseInstant } from './reading.js';
 /** Odoo's counting unit, left out of quantities: "10 Paperclip", not "10 Units Paperclip". */
 const COUNTING_UNIT = 'Units';
 
+/** `money(value, currency)` formats an amount in an ISO currency, one formatter per currency. */
+export function moneyFormat(locale) {
+    const formats = new Map();
+    return (value, currency) => {
+        if (!formats.has(currency)) {
+            formats.set(currency, new Intl.NumberFormat(locale, { style: 'currency', currency }));
+        }
+        return formats.get(currency).format(value);
+    };
+}
+
 export function worldFormats() {
     return {
         number: new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }),
         time: new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }),
         datetime: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
+        money: moneyFormat(undefined),
     };
 }
 
@@ -72,13 +85,73 @@ function describeShipment(shipment, now, acting, pending, formats) {
     };
 }
 
+/** The company's account: the score, and the last few movements on it. */
+function describeBank(bank, formats) {
+    if (!bank) {
+        return null;
+    }
+    return {
+        balance: formats.money(bank.balance, bank.currency),
+        number: `Account ${bank.number}`,
+        transactions: bank.transactions.map((transaction) => {
+            const incoming = transaction.amount > 0;
+            const sign = incoming ? '+' : '−';
+            return {
+                key: transaction.id,
+                incoming,
+                amount: `${sign}${formats.money(Math.abs(transaction.amount), bank.currency)}`,
+                text: [transaction.counterparty ?? 'Deposit', transaction.reference]
+                    .filter(Boolean).join(' · '),
+                date: formats.datetime.format(parseInstant(transaction.date)),
+            };
+        }),
+    };
+}
+
+function describeOrder(order, now, acting, pending, formats) {
+    const money = (value) => formats.money(value, order.currency);
+    const { invoice } = order;
+    const due = invoice?.date_due ? parseInstant(invoice.date_due) : null;
+    // Due by the clock counts as paid, as arrived does for a delivery:
+    // shipping settles first, so the payment lands before the goods leave.
+    const payingNow = order.state === 'invoiced' && due !== null && now !== null && now >= due;
+    const paid = order.state === 'paid' || payingNow;
+    const paidQty = order.state === 'paid' ? order.qty_paid : invoice?.qty;
+
+    let status;
+    let tone = 'wait';
+    if (order.state === 'requested' && invoice?.state === 'refused') {
+        status = `Refused ${invoice.name}: ${invoice.reason}`;
+        tone = 'fault';
+    } else if (order.state === 'requested') {
+        status = 'Waiting for your invoice';
+    } else if (payingNow) {
+        status = `Paying ${invoice.name}…`;
+        tone = 'ready';
+    } else if (order.state === 'invoiced') {
+        status = `Accepted ${invoice.name} for ${money(invoice.amount)}; pays ${formats.datetime.format(due)}`;
+    } else {
+        status = `Paid ${money(order.amount_paid)}`;
+        tone = 'ready';
+    }
+    return {
+        key: order.id,
+        title: `${order.customer} wants ${goods({ ...order.product, qty: order.qty }, formats)}`,
+        terms: `Pays up to ${money(order.max_price)} each, taxes included`,
+        status,
+        tone,
+        ship: paid ? `Ship ${goods({ ...order.product, qty: paidQty }, formats)}` : null,
+        canShip: acting && paid && !pending,
+    };
+}
+
 /**
  * Describe `{ world, reading, pending, error }` as what to show.
  *
  * `reading` is the clock (`readClock`), used for progress and for whether the
  * world is running at all: nothing can be done in a paused or stopped world,
  * and the server refuses it anyway.  `pending` holds the keys of actions in
- * flight (`station:<id>`, `shipment:<id>`), whose buttons wait.
+ * flight (`station:<id>`, `shipment:<id>`, `order:<id>`), whose buttons wait.
  */
 export function describeWorld({ world, reading, pending = new Set(), error = null }, formats) {
     if (!world) {
@@ -98,6 +171,10 @@ export function describeWorld({ world, reading, pending = new Set(), error = nul
         )),
         shipments: world.shipments.map((shipment) => describeShipment(
             shipment, now, acting, pending.has(`shipment:${shipment.id}`), formats,
+        )),
+        bank: describeBank(world.bank ?? null, formats),
+        orders: (world.customer_orders ?? []).map((order) => describeOrder(
+            order, now, acting, pending.has(`order:${order.id}`), formats,
         )),
     };
 }
@@ -145,8 +222,8 @@ export function keyed(container, items, create, update) {
 /**
  * Build the world inside `root`, and return `render(state)` to update it.
  *
- * `actions.start(stationId, { qty, productionId })` and
- * `actions.accept(shipmentId)` are called when the player presses a button.
+ * `actions.start(stationId, { qty, productionId })`, `actions.accept(shipmentId)`
+ * and `actions.ship(orderId)` are called when the player presses a button.
  */
 export function createWorldView(root, actions, formats = worldFormats()) {
     const error = element('p', 'world-error');
@@ -164,11 +241,22 @@ export function createWorldView(root, actions, formats = worldFormats()) {
     const shipments = element('ul', 'shipments');
     const noShipments = element('p', 'empty', 'Nothing on the way.');
 
+    const balance = element('p', 'balance');
+    const accountNumber = element('p', 'account');
+    const transactions = element('ul', 'transactions');
+    const noTransactions = element('p', 'empty', 'No money has moved yet.');
+    const bank = panel('Bank', balance, accountNumber, transactions, noTransactions);
+
+    const orders = element('ul', 'orders');
+    const noOrders = element('p', 'empty', 'Nobody is asking for anything.');
+
     const world = element('div', 'world');
     world.append(
         error,
+        bank,
         panel('On hand', stockTable),
         panel('Workstations', stations),
+        panel('Customer orders', orders, noOrders),
         panel('Deliveries', shipments, noShipments),
     );
     root.replaceChildren(world);
@@ -280,6 +368,45 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         refs.button.disabled = !shipment.canAccept;
     }
 
+    function createTransaction() {
+        const item = element('li', 'transaction');
+        item.append(element('span', 'amount'), element('span', 'what'), element('span', 'when'));
+        return item;
+    }
+
+    function updateTransaction(item, transaction) {
+        item.dataset.incoming = transaction.incoming;
+        item.children[0].textContent = transaction.amount;
+        item.children[1].textContent = transaction.text;
+        item.children[2].textContent = transaction.date;
+    }
+
+    function createOrder(order) {
+        const item = element('li', 'order');
+        const refs = {
+            title: element('h3'),
+            terms: element('p', 'order-terms'),
+            status: element('p', 'order-status'),
+            button: element('button'),
+        };
+        refs.button.type = 'button';
+        refs.button.addEventListener('click', () => actions.ship(order.key));
+        item.append(refs.title, refs.terms, refs.status, refs.button);
+        item.refs = refs;
+        return item;
+    }
+
+    function updateOrder(item, order) {
+        const { refs } = item;
+        item.dataset.tone = order.tone;
+        refs.title.textContent = order.title;
+        refs.terms.textContent = order.terms;
+        refs.status.textContent = order.status;
+        refs.button.hidden = !order.ship;
+        refs.button.textContent = order.ship ?? '';
+        refs.button.disabled = !order.canShip;
+    }
+
     return function render(state) {
         const shown = describeWorld(state, formats);
         world.hidden = !shown;
@@ -292,5 +419,14 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         keyed(stations, shown.stations, createStation, updateStation);
         keyed(shipments, shown.shipments, createShipment, updateShipment);
         noShipments.hidden = shown.shipments.length > 0;
+        keyed(orders, shown.orders, createOrder, updateOrder);
+        noOrders.hidden = shown.orders.length > 0;
+        bank.hidden = !shown.bank;
+        if (shown.bank) {
+            balance.textContent = shown.bank.balance;
+            accountNumber.textContent = shown.bank.number;
+            keyed(transactions, shown.bank.transactions, createTransaction, updateTransaction);
+            noTransactions.hidden = shown.bank.transactions.length > 0;
+        }
     };
 }

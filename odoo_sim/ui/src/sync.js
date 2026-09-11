@@ -6,7 +6,7 @@
  * every action the player takes.  They can land out of order -- a fetch sent
  * before a button press can answer after it -- so each request takes a ticket
  * when it is sent, and an answer is only applied if nothing sent later has
- * been applied already.  See GAME_STATE.md 8.
+ * been applied already.  See GAME_STATE.md 10.
  *
  * The bus notice carries nothing on purpose (any socket may subscribe to the
  * channel), so a fetch is the only way the page learns *what* changed.
