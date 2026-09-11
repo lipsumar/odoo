@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+<!--
+    Work orders and units of measure are visible to employees: the bill of
+    materials has an operation, and wire is bought in spools but used in metres.
+-->
+<record id="base.group_user" model="res.groups">
+    <field name="implied_ids" eval="[Command.link(ref('mrp.group_mrp_routings')), Command.link(ref('uom.group_uom'))]"/>
+</record>
+
+<!--
+    Everything else is noupdate: from the moment the scenario is installed,
+    the Odoo half belongs to the player, and upgrading the module must not
+    undo what they did to their BoM or their prices.
+-->
+<data noupdate="1">
+
+    <!-- ===== What Odoo says: the player's starting records ===== -->
+
+    <record id="uom_spool" model="uom.uom">
+        <field name="name">Spool (50 m)</field>
+        <field name="relative_factor">50</field>
+        <field name="relative_uom_id" ref="uom.product_uom_meter"/>
+    </record>
+
+    <record id="partner_wire_vendor" model="res.partner">
+        <field name="name">Tensile Wire Supply</field>
+        <field name="is_company" eval="True"/>
+        <field name="email">orders@tensile-wire.example.com</field>
+    </record>
+
+    <record id="product_wire" model="product.product">
+        <field name="name">Wire</field>
+        <field name="is_storable" eval="True"/>
+        <field name="uom_id" ref="uom.product_uom_meter"/>
+        <field name="standard_price">0.25</field>
+        <field name="sale_ok" eval="False"/>
+        <field name="route_ids" eval="[Command.link(ref('purchase_stock.route_warehouse0_buy'))]"/>
+    </record>
+
+    <record id="supplierinfo_wire" model="product.supplierinfo">
+        <field name="product_tmpl_id" ref="product_wire_product_template"/>
+        <field name="partner_id" ref="partner_wire_vendor"/>
+        <field name="product_uom_id" ref="uom_spool"/>
+        <field name="min_qty">1</field>
+        <field name="price">12.50</field>
+        <field name="delay">1</field>
+    </record>
+
+    <record id="product_paperclip" model="product.product">
+        <field name="name">Paperclip</field>
+        <field name="is_storable" eval="True"/>
+        <field name="uom_id" ref="uom.product_uom_unit"/>
+        <field name="list_price">0.05</field>
+        <field name="purchase_ok" eval="False"/>
+        <field name="route_ids" eval="[Command.link(ref('mrp.route_warehouse0_manufacture'))]"/>
+    </record>
+
+    <record id="workcenter_paperclip_bench" model="mrp.workcenter">
+        <field name="name">Paperclip bench</field>
+    </record>
+
+    <record id="bom_paperclip" model="mrp.bom">
+        <field name="product_tmpl_id" ref="product_paperclip_product_template"/>
+        <field name="product_qty">1</field>
+        <field name="product_uom_id" ref="uom.product_uom_unit"/>
+    </record>
+
+    <record id="bom_paperclip_operation" model="mrp.routing.workcenter">
+        <field name="bom_id" ref="bom_paperclip"/>
+        <field name="workcenter_id" ref="workcenter_paperclip_bench"/>
+        <field name="name">Manufacture paperclip</field>
+        <field name="time_cycle_manual">2</field>
+    </record>
+
+    <record id="bom_paperclip_line_wire" model="mrp.bom.line">
+        <field name="bom_id" ref="bom_paperclip"/>
+        <field name="product_id" ref="product_wire"/>
+        <field name="product_qty">0.1</field>
+        <field name="product_uom_id" ref="uom.product_uom_meter"/>
+    </record>
+
+    <!-- ===== What is: the world behind them ===== -->
+
+    <!-- 10 cm of wire and two game minutes per paperclip, whatever the BoM says. -->
+    <record id="recipe_paperclip" model="game.recipe">
+        <field name="product_id" ref="product_paperclip"/>
+        <field name="duration">2</field>
+        <field name="line_ids" eval="[Command.create({'product_id': ref('product_wire'), 'qty': 0.1})]"/>
+    </record>
+
+    <record id="workstation_paperclip_bench" model="game.workstation">
+        <field name="name">Paperclip bench</field>
+        <field name="recipe_id" ref="recipe_paperclip"/>
+        <field name="workcenter_id" ref="workcenter_paperclip_bench"/>
+    </record>
+
+    <!-- Ships wire, and only wire, a game day after it receives an order. -->
+    <record id="vendor_wire" model="game.vendor">
+        <field name="partner_id" ref="partner_wire_vendor"/>
+        <field name="lead_time">24</field>
+        <field name="product_ids" eval="[Command.link(ref('product_wire'))]"/>
+    </record>
+
+</data>
+
+</odoo>

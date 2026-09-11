@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from odoo import fields, game_clock
 from odoo.addons.base.models.ir_cron import MAX_FAIL_TIME, BadModuleState, IrCron
+from odoo.addons.base.models.ir_mail_server import IrMail_Server, MailDeliveryException
 from odoo.cli import sim_init
 from odoo.game_clock import GameClock
 from odoo.tests.common import BaseCase, TransactionCase, freeze_time
@@ -227,6 +228,24 @@ def installed_game_world(cr, game_now=GAME_START, rate=60, max_gap=NO_CLAMP):
     finally:
         game_clock.invalidate(cr.dbname)
         cr._now = None
+
+
+class TestGameClockMail(TransactionCase):
+    """A world's mail never leaves it, whether or not the game is installed."""
+
+    def test_a_world_never_opens_an_smtp_connection(self):
+        """ The backstop in ``_connect__``, reached past any override.
+
+        ``odoo_sim`` posts a world's mail instead of sending it and never gets
+        this far; this is what stops a world *without* the game emailing
+        whoever its database has addresses for.  Test mode would return before
+        the guard, so it is switched off -- with a tripwire on SMTP itself.
+        """
+        with game_world(self.env.cr, a_clock()), \
+                patch.object(IrMail_Server, '_disable_send', return_value=False), \
+                patch('smtplib.SMTP', side_effect=AssertionError("an SMTP connection was opened")), \
+                self.assertRaisesRegex(MailDeliveryException, "game world"):
+            IrMail_Server._connect__(self.env['ir.mail_server'], host='localhost', port=25)
 
 
 class TestGameClockDatabase(TransactionCase):

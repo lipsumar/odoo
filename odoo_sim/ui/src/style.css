@@ -5,6 +5,9 @@
     --muted: #6b6b66;
     --wait: #8a6d1f;
     --fault: #b3261e;
+    --surface: #ffffff;
+    --line: #e2e2dd;
+    --accent: #2f5d8a;
     font: 16px/1.5 system-ui, sans-serif;
 }
 
@@ -15,6 +18,9 @@
         --muted: #9a9a94;
         --wait: #e0b94f;
         --fault: #f2877f;
+        --surface: #1f1f1d;
+        --line: #33332f;
+        --accent: #8fb8e0;
     }
 }
 
@@ -27,10 +33,10 @@ body {
 }
 
 #game {
-    display: grid;
-    place-items: center;
-    min-height: 100%;
+    max-width: 60rem;
+    margin: 0 auto;
     padding-inline: 1rem;
+    padding-block: 2rem;
 }
 
 .clock {
@@ -39,7 +45,7 @@ body {
 
 .clock-time {
     display: block;
-    font-size: clamp(3rem, 14vw, 7rem);
+    font-size: clamp(2.5rem, 10vw, 4.5rem);
     font-weight: 300;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.02em;
@@ -52,7 +58,7 @@ body {
 }
 
 .clock-world {
-    margin: 1.5rem 0 0;
+    margin: 0.5rem 0 0;
     color: var(--muted);
 }
 
@@ -75,4 +81,313 @@ body {
 
 .clock-link a {
     color: inherit;
+}
+
+/* -- the world ---------------------------------------------------------- */
+
+/* The views toggle `hidden`, which any `display` rule below would override. */
+[hidden] {
+    display: none !important;
+}
+
+.world {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 1rem;
+    margin-top: 2rem;
+}
+
+.panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.panel h2 {
+    margin: 0 0 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.panel h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.panel p {
+    margin: 0.25rem 0 0;
+}
+
+.world-error {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: var(--fault);
+}
+
+.stock {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.stock th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--muted);
+}
+
+.stock td,
+.stock th {
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.stock .qty {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.stations {
+    display: grid;
+    gap: 1rem;
+}
+
+.recipe,
+.run-status,
+.shipment-status,
+.empty {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.station-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+.station-form label {
+    display: grid;
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.station-form input {
+    width: 5rem;
+}
+
+.run {
+    margin-top: 0.75rem;
+}
+
+.run progress {
+    width: 100%;
+}
+
+button {
+    font: inherit;
+    padding: 0.35rem 0.9rem;
+    border: 0;
+    border-radius: 0.35rem;
+    background: var(--accent);
+    color: var(--surface);
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.shipments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.75rem;
+}
+
+.shipment button {
+    margin-top: 0.5rem;
+}
+
+.shipment[data-here="true"] .shipment-status {
+    color: var(--ink);
+    font-weight: 500;
+}
+
+/* -- mail --------------------------------------------------------------- */
+
+.mail {
+    margin-top: 1rem;
+}
+
+.mail-address {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.mail-bar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+}
+
+.mail-folders {
+    display: flex;
+    gap: 0.25rem;
+}
+
+button.secondary,
+.mail-folder {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--line);
+}
+
+.mail-folder[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--surface);
+    border-color: var(--accent);
+}
+
+.mail-columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+    gap: 1rem;
+    align-items: start;
+}
+
+.mail-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+}
+
+.mail-item {
+    border-bottom: 1px solid var(--line);
+}
+
+.mail-item button {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.25rem;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+
+.mail-item[data-open="true"] button {
+    background: var(--ground);
+}
+
+.mail-who,
+.mail-subject,
+.mail-preview {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.mail-date {
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.mail-subject,
+.mail-preview {
+    grid-column: 1 / -1;
+}
+
+.mail-preview {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.mail-item[data-unread="true"] .mail-who,
+.mail-item[data-unread="true"] .mail-subject {
+    font-weight: 600;
+}
+
+.mail-pane {
+    display: grid;
+    gap: 1rem;
+    min-width: 0;
+}
+
+.mail-headers {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0 0.75rem;
+    margin: 0.5rem 0;
+    font-size: 0.9rem;
+}
+
+.mail-headers dt {
+    color: var(--muted);
+}
+
+.mail-headers dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.mail-content {
+    width: 100%;
+    height: 22rem;
+    border: 1px solid var(--line);
+    border-radius: 0.35rem;
+    background: #fff;
+    resize: vertical;
+}
+
+.mail-attachments,
+.mail-waiting {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.mail-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.mail-compose {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.mail-compose label {
+    display: grid;
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.mail-compose input,
+.mail-compose textarea {
+    font: inherit;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0.35rem;
+    padding: 0.35rem 0.5rem;
+}
+
+.mail-error {
+    margin: 0;
+    color: var(--fault);
 }

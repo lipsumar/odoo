@@ -85,7 +85,7 @@ export function createView(root, formats = localFormats()) {
     link.className = 'clock-link';
     link.setAttribute('role', 'status');
 
-    const clock = document.createElement('main');
+    const clock = document.createElement('section');
     clock.className = 'clock';
     clock.append(time, date, world, link);
     root.replaceChildren(clock);

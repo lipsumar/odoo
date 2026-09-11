@@ -767,7 +767,9 @@ Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
 `install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
 `odoo/tests/test_cursor.py`, `odoo/orm/fields_temporal.py` and
 `odoo/addons/base/models/ir_cron.py` — 36 inserted lines across the five
-existing files.
+existing files. `MAIL.md` §3 adds one more: a guard in
+`odoo/addons/base/models/ir_mail_server.py`, so that a world never opens an
+SMTP connection, game addon or not.
 
 ## 8. Testing
 

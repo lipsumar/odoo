@@ -1,7 +1,10 @@
 # Running a game world
 
 How to create, drive, pause and stop an odoo-sim world. For *why* any of it
-works this way, see [DESIGN.md](DESIGN.md).
+works this way, see [DESIGN.md](DESIGN.md) (the clock),
+[UI_DESIGN.md](UI_DESIGN.md) (the page), [GAME_STATE.md](GAME_STATE.md)
+(what exists in the world, as opposed to what Odoo records) and
+[MAIL.md](MAIL.md) (email, which never leaves a world).
 
 The one idea worth having up front: **game time is not derived from the clock
 on the wall.** It is a number in a table that the game loop pushes forward. No
@@ -89,9 +92,10 @@ hour here — and stays there. It is bounded and harmless; it is not a leak.
 Not to run a world. `sim_init`, `game_run` and `sim_pause` are found on the
 addons path and run whether or not the `odoo_sim` module is installed.
 
-**The UI is the exception.** Routes and templates come from the registry, so
-`/game` and `/game/api/clock` exist only on a database that has the module
-installed:
+**The UI and the world are the exception.** Routes, templates and the game's
+own models come from the registry, so `/game`, its API and the world's state
+exist only on a database that has the module installed (it brings `mrp` and
+`purchase_stock` with it):
 
 ```bash
 odoo-bin -d mygame -i odoo_sim --stop-after-init
@@ -191,6 +195,64 @@ odoo-bin -d mygame --max-cron-threads=0 --workers=4 --http-port=8070
 
 Without that flag it polls crons too, on its own schedule, and the game loop is
 no longer the only thing driving the world.
+
+---
+
+## Playing the paperclip scenario
+
+A company that makes paperclips from wire it buys in 50 m spools
+([GAME_STATE.md](GAME_STATE.md) §10):
+
+```bash
+odoo-bin -d mygame -i odoo_sim_paperclips --stop-after-init
+odoo-bin game_run -d mygame
+```
+
+Then, at `http://localhost:8069`:
+
+1. **Buy wire.** In Purchase, order Wire from *Tensile Wire Supply* and confirm
+   the order. The vendor ships it; `/game` shows it under *Deliveries*,
+   arriving a game day later.
+2. **Take delivery.** When it is at the door, press *Accept delivery* on
+   `/game`. The wire now exists. Validating the receipt in Odoo is how you
+   *record* that, and the game never checks that you did.
+3. **Make paperclips.** Create a manufacturing order in Odoo if you like, then
+   at the *Paperclip bench* on `/game` pick a quantity (and the order), and press
+   *Manufacture*. Each paperclip takes 10 cm of wire and two game minutes.
+4. **Record it.** Mark the manufacturing order done in Odoo, or don't. Odoo
+   will believe whatever you tell it; the world won't.
+
+To see what the world holds, rather than what Odoo says it holds, turn on
+debug mode and open *Settings → Technical → Game World*: the balance, the
+ledger of every real event, the runs and the shipments, all read-only.
+
+---
+
+## Email
+
+**A world's email never leaves it, and no real email comes in**
+([MAIL.md](MAIL.md)). Odoo still sends everything it normally would. The game
+catches it where it would have reached a mail server, and delivers it inside
+the world according to the address:
+
+- **an employee's address** goes to their inbox, under *Mail* on `/game`,
+  where they can read it, reply and write new mail;
+- **one of Odoo's aliases, or anything on an alias domain** goes to Odoo's own
+  mail gateway, as if fetchmail had brought it in. An alias creates its record,
+  and a reply lands on the chatter of the record it answers;
+- **anyone else** goes to a mailbox outside the company, where the world's
+  agents will read it.
+
+There is nothing to set up for SMTP. A configured outgoing server is simply
+never used, and an incoming one fetches nothing. For aliases and replies, the
+company needs an alias domain, as in any Odoo: *Settings → General Settings →
+Alias Domain*. Your address is your user's email, and *Notification: By
+Emails* in your preferences sends Odoo's notifications to the game inbox
+rather than to Discuss.
+
+In debug mode, *Settings → Technical → Game World → Post* lists every email
+sent in the world, and *Deliveries* shows where each copy went, including
+anything Odoo's gateway refused and why.
 
 ---
 

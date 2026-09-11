@@ -21,7 +21,7 @@ from OpenSSL.SSL import VERIFY_FAIL_IF_NO_PEER_CERT, VERIFY_PEER
 from OpenSSL.SSL import Error as SSLError
 from urllib3.contrib.pyopenssl import PyOpenSSLContext, get_subj_alt_name
 
-from odoo import _, api, fields, models, modules, tools
+from odoo import _, api, fields, game_clock, models, modules, tools
 from odoo.exceptions import UserError
 from odoo.tools import (
     email_domain_extract,
@@ -402,6 +402,13 @@ class IrMail_Server(models.Model):
         # Do not actually connect while running in test mode
         if self._disable_send():
             return None
+        # A game world is a closed system: its mail is delivered by the game
+        # (addons/odoo_sim, odoo_sim/MAIL.md), never by an SMTP server.  This is
+        # the backstop for a world that does not have the game installed.
+        if game_clock.clock_for(self.env.cr.dbname, self.env.cr) is not None:
+            # self.env._ and not _: the module-level _ looks for a local called
+            # 'user' to find a language, and here that is the SMTP username.
+            raise MailDeliveryException(self.env._("%s is a game world: its email never leaves it.", self.env.cr.dbname))
         mail_server = smtp_encryption = None
         if mail_server_id:
             mail_server = self.sudo().browse(mail_server_id)
