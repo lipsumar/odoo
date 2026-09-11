@@ -3,8 +3,8 @@
 How to create, drive, pause and stop an odoo-sim world. For *why* any of it
 works this way, see [DESIGN.md](DESIGN.md) (the clock),
 [UI_DESIGN.md](UI_DESIGN.md) (the page), [GAME_STATE.md](GAME_STATE.md)
-(what exists in the world, as opposed to what Odoo records) and
-[MAIL.md](MAIL.md) (email, which never leaves a world).
+(what exists in the world, and the money in its bank, as opposed to what Odoo
+records) and [MAIL.md](MAIL.md) (email, which never leaves a world).
 
 The one idea worth having up front: **game time is not derived from the clock
 on the wall.** It is a number in a table that the game loop pushes forward. No
@@ -94,8 +94,8 @@ addons path and run whether or not the `odoo_sim` module is installed.
 
 **The UI and the world are the exception.** Routes, templates and the game's
 own models come from the registry, so `/game`, its API and the world's state
-exist only on a database that has the module installed (it brings `mrp` and
-`purchase_stock` with it):
+exist only on a database that has the module installed (it brings `mrp`,
+`purchase_stock` and `sale_stock` with it):
 
 ```bash
 odoo-bin -d mygame -i odoo_sim --stop-after-init
@@ -200,8 +200,9 @@ no longer the only thing driving the world.
 
 ## Playing the paperclip scenario
 
-A company that makes paperclips from wire it buys in 50 m spools
-([GAME_STATE.md](GAME_STATE.md) §10):
+A company that makes paperclips from wire it buys in 50 m spools, and sells
+them to a customer who pays through the game bank
+([GAME_STATE.md](GAME_STATE.md) §12):
 
 ```bash
 odoo-bin -d mygame -i odoo_sim_paperclips --stop-after-init
@@ -221,10 +222,26 @@ Then, at `http://localhost:8069`:
    *Manufacture*. Each paperclip takes 10 cm of wire and two game minutes.
 4. **Record it.** Mark the manufacturing order done in Odoo, or don't. Odoo
    will believe whatever you tell it; the world won't.
+5. **A customer asks.** *Binder & Co.* wants 200 paperclips, at 0.08 each at
+   most, taxes included. Until the game has email, its message lands on its
+   contact in Odoo; `/game` shows the order under *Customer orders*.
+6. **Invoice it.** In Sales, quote 200 paperclips to Binder & Co., confirm,
+   create the invoice and post it. The customer reads it within a tick: if it
+   asks too much, or for the wrong thing, the order says why it was refused
+   (and so does a message on the contact). Otherwise it pays four game hours
+   later.
+7. **Get paid.** The payment lands in the company's account at the game bank,
+   the balance at the top of `/game`, which is the score. The bank feed
+   imports it into your Bank journal as a statement line, within a tick.
+   Record it with *Register Payment* on the invoice: community Odoo cannot
+   match a statement line to an invoice.
+8. **Ship.** Once paid, press *Ship* on `/game`: the paperclips leave the
+   world. Validating the delivery order in Odoo is how you record that.
 
 To see what the world holds, rather than what Odoo says it holds, turn on
 debug mode and open *Settings → Technical → Game World*: the balance, the
-ledger of every real event, the runs and the shipments, all read-only.
+ledger of every real event, the runs, the shipments, the bank's accounts and
+transactions, and the customers' orders, all read-only.
 
 ---
 

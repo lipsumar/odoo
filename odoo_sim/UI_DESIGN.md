@@ -342,8 +342,9 @@ tests drive both by hand.
 
 ### 5.5 Game state — built, see `GAME_STATE.md`
 
-Built as described here, for manufacturing and purchasing: `GAME_STATE.md`
-has the models, the endpoints (`/game/api/world` and the actions), and why the
+Built as described here, for manufacturing, purchasing, selling and the
+game bank: `GAME_STATE.md` has the models, the endpoints (`/game/api/world`
+and the actions), and why the
 bus carries only a content-free notice that the world changed.
 
 Declare game state as ordinary Odoo models — `game.player`, `game.plot` — which

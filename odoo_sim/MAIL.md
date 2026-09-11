@@ -73,7 +73,7 @@ everywhere else (`DESIGN.md` §4.1).
 | `game.email.delivery` | one copy at one address: `address` (normalized), `route` (`player` / `odoo` / `outside`), `user_id` for a player, `state` (`in_transit` → `delivered` or `failed`), `is_read`, and the gateway's `failure` |
 
 Read-only for `base.group_system`, writable by nobody, like every `game.*`
-model (`GAME_STATE.md` §9). *Settings → Technical → Game World → Post* and
+model (`GAME_STATE.md` §11). *Settings → Technical → Game World → Post* and
 *Deliveries* (debug mode) show everything that was sent and where each copy
 went.
 
@@ -138,7 +138,7 @@ makes (`GAME_STATE.md` §6.1).
   it decides to send one, are ordinary Odoo mail and come back through the
   post.
 - Outside copies are then passed to the agents' hook (§8).
-- The page is told the world changed (`GAME_STATE.md` §8).
+- The page is told the world changed (`GAME_STATE.md` §10).
 
 **One email per transaction.** A gateway refusal rolls back a savepoint, and
 rolling back a savepoint clears the whole transaction's `precommit` queue
@@ -169,7 +169,7 @@ the mail.
   bodies — whenever the routes pass the player. So the bootstrap blob, every
   action's answer, and every refetch after a `world_changed` notice carry it,
   and `sync.js`'s ordering applies to it unchanged. The notice still carries
-  nothing (`GAME_STATE.md` §8).
+  nothing (`GAME_STATE.md` §10).
 - **Mail is private.** An email is shown only to whoever received it or wrote
   it, and is a 404 to anyone else — including as a `parent_id`.
 - **Sending needs a running world** (`is_running`). The post office is a cron,
@@ -244,7 +244,7 @@ mailbox, where a future vendor that reads email will find it.
 - **The post office runs while paused.** Its triggers are due at the paused
   game instant, and the loop keeps polling. Sending from the game page is
   refused while the world stands still, but the Odoo backend is not guarded
-  (`GAME_STATE.md` §8), so mail Odoo sends then is delivered then.
+  (`GAME_STATE.md` §10), so mail Odoo sends then is delivered then.
 - **A gateway refusal is recorded, not bounced.** When Odoo's gateway raises
   rather than bouncing, the sender is not told. The failure is in
   *Deliveries*. A mail-server bounce would be the realistic answer.
