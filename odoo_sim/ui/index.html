@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+    For `npm run dev` only. In production the page is `GET /game`, rendered by
+    Odoo from views/index.xml; the build never reads this file (its entry is
+    src/main.js, see vite.config.js).
+
+    Log in on Odoo's own port first: the session cookie is shared, because
+    cookies ignore the port.
+-->
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Odoo Sim (dev)</title>
+        <script>
+            // Stands in for the bootstrap blob `GET /game` renders.  Written
+            // out by hand, so it can drift from the server: `channel` and
+            // `type` must match pulse.py, and `websocket_version` must match
+            // WebsocketConnectionHandler._VERSION in addons/bus/websocket.py.
+            // Get the first two wrong and the clock silently never moves; get
+            // the last wrong and the page says the server has been updated.
+            // No `clock`: the page fetches one on start.
+            window.odooSim = {
+                channel: 'odoo_sim.world',
+                type: 'odoo_sim.pulse',
+                websocket_version: '19.0-2',
+                clock: null,
+            };
+        </script>
+    </head>
+    <body>
+        <div id="game"></div>
+        <script type="module" src="/src/main.js"></script>
+    </body>
+</html>

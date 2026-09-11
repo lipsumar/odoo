@@ -1,7 +1,7 @@
 # Odoo Sim — Materialising the Game
 
-Status: the clock, the loop, the pulse, the page and the clock endpoint are
-built; the frontend is not.
+Status: milestone 1 is built — the clock, the loop, the pulse, the page, the
+clock endpoint, and the frontend in `odoo_sim/ui/`.
 Branch: `odoo-sim`
 Target: Odoo 19.0
 Companion to `DESIGN.md` (the game clock), which is assumed throughout.
@@ -29,10 +29,9 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > - `addons/odoo_sim/controllers/main.py` — `GET /game` renders the page,
 >   `GET /game/api/clock` returns the clock reading.
 > - `addons/odoo_sim/views/index.xml` — the standalone page template, with a
->   "frontend not built" fallback it currently shows.
->
-> What is left: `odoo_sim/ui/`, a Vite project that subscribes to the pulse and
-> displays the clock.
+>   "frontend not built" fallback for a tree nobody has run `npm run build` in.
+> - `odoo_sim/ui/` — the Vite project that subscribes to the pulse and displays
+>   the clock (§5.4).
 
 ## 1. Problem
 
@@ -125,6 +124,15 @@ wire is plain JSON: `addons/bus/websocket.py:909` reads
 subscribe frame is the whole client — no `bus_service`, no `SharedWorker`, no
 OWL.
 
+**One catch: the handshake needs a version.** `_serve_forever`
+(`addons/bus/websocket.py:1119`) closes any socket from a browser — anything
+sending a `User-Agent` — whose `?version=` query parameter is not
+`WebsocketConnectionHandler._VERSION` (`"19.0-2"` today). It closes *cleanly*,
+with reason `OUTDATED_VERSION`, so that a stale Odoo worker gives up rather than
+retries. The value changes whenever the bus's own client does, so the page gets
+it from the server in the bootstrap blob rather than spelling it in JavaScript
+(§5.3).
+
 Server side, `addons/odoo_sim/pulse.py` already publishes. `pulse.send(cr,
 clock)` calls `env['bus.bus']._sendone` on channel `odoo_sim.world` with type
 `odoo_sim.pulse`, and the game loop calls it once per tick, unconditionally
@@ -186,8 +194,8 @@ websocket. Vite is there for three things wanted on day one, none of which imply
 a framework:
 
 - a dev server with HMR,
-- a proxy for `/game`, `/game/api` and `/websocket`, so the browser talks only
-  to Vite and there is no CORS and the session cookie is same-origin,
+- a proxy for `/game/api` and `/websocket`, so the dev page talks only to Vite
+  and there is no CORS,
 - a content-hashed production build.
 
 Whether the eventual *renderer* wants a library (canvas, Pixi, Phaser) is a
@@ -202,7 +210,13 @@ odoo_sim/
   DESIGN.md            game clock
   UI_DESIGN.md         this document
   README.md            how to run a world
-  ui/                  the Vite project, its own package.json     <- TO BUILD
+  ui/                  the Vite project, its own package.json
+    index.html         dev-server page only; the build never reads it
+    src/main.js        entry: wires the blob, the view and the watcher
+    src/reading.js     payload -> reading; the UTC parse
+    src/world.js       socket + fetch fallback + reconnect
+    src/view.js        describe() (pure) and the DOM that shows it
+    test/              node:test, no DOM, no extra dependencies
 
 addons/odoo_sim/       depends: base, bus
   loop.py              GameLoop: the clock and cron threads, and the refusals
@@ -211,7 +225,7 @@ addons/odoo_sim/       depends: base, bus
   cli/sim_pause.py     pause / resume
   controllers/main.py  GET /game  +  GET /game/api/clock
   views/index.xml      the standalone page template
-  static/dist/         vite build output, served raw (§2.1)      <- TO BUILD
+  static/dist/         vite build output, served raw (§2.1); gitignored
   tests/
 ```
 
@@ -253,49 +267,78 @@ and after it drops.
 
 `GET /game` renders `odoo_sim.index`: a hand-written document (§2.2) behind
 `auth='user'`, carrying a bootstrap blob with the first clock reading, the bus
-channel, and the notification type. The controller reads
+channel, the notification type, and the bus's websocket version (§2.5). The
+controller reads
 `static/dist/.vite/manifest.json` at render time to find the hashed entry
 filename; if nothing is built it renders a "frontend is not built" fallback
 that still carries the live clock blob in `window.odooSim`.
 
-### 5.4 The client — to build
+### 5.4 The client — built
 
 `odoo_sim/ui/`, a Vite vanilla-JS project. The websocket is in milestone 1
 deliberately: it is the transport every later screen uses (game events ride the
 same channel), and standing it up now against a payload that is only a clock is
 the cheapest it will ever be to get right.
 
-Milestone 1:
+What it does:
 
-1. Read the bootstrap blob from `window.odooSim` (the first clock reading, the
-   channel name, the type) and paint `game_now` into a single div.
-2. Open a `WebSocket` to `/websocket`, send one subscribe frame
+1. Read the bootstrap blob from `window.odooSim` and paint the first reading:
+   the game time, the date, and the world's state.
+2. Open a `WebSocket` to `/websocket?version=<websocket_version>` (§2.5) and
+   send one subscribe frame
    `{"event_name": "subscribe", "data": {"channels": ["odoo_sim.world"], "last": 0}}`
    (`ir.websocket._subscribe` reads both keys directly, so `last` is not
    optional). Each inbound frame is a JSON **array** of
-   `{"id", "message": {"type", "payload"}}`; for every element whose
-   `message.type` is `"odoo_sim.pulse"`, write `message.payload.game_now` into
-   the div.
-3. `fetch('/game/api/clock')` once before the socket is open, and again on
-   `close`/`error` before reconnecting, so the div is never blank and a
-   reconnect resyncs rather than resumes (§7).
-4. If `paused` is true, say so. If the socket is closed and the fetch fails, say
-   that.
+   `{"id", "message": {"type", "payload"}}`, including a few notifications the
+   bus adds for its own channels; every element whose `message.type` is
+   `"odoo_sim.pulse"` is a new reading.
+3. `fetch('/game/api/clock')` once on start, and again whenever the socket
+   closes, before reconnecting. A reconnect resyncs rather than resumes (§7):
+   `last` is **always 0**, never the highest id seen. A fetch that resolves
+   after a pulse has arrived is dropped, because the pulse is newer and
+   applying the fetch would step the clock backwards.
+4. Reconnect with a backoff that doubles from 1 s to a 15 s ceiling, and resets
+   on the first pulse (not on `open`, which the server can follow with an
+   immediate close).
+5. Say what is going on: *Running at K×*, *Paused*, or — from a fetch only,
+   since pulses come from the loop — *Stopped: nothing is ticking this world*.
+   While the socket is down there is a second line: *Reconnecting…*, or *Cannot
+   reach the server* once the fetch has failed too.
+6. Two cases stop retrying, because retrying could only fail the same way:
+   close code `4001` or a `403` from the fetch (the session has gone — offer
+   a login link), and the `OUTDATED_VERSION` close (the server's bus changed
+   under the page — offer a reload).
 
-That is the whole POC. **No interpolation, no lock** — the clock steps forward
-by `rate` game seconds on each pulse (~1 s) rather than sweeping, and a dead
-loop shows as a frozen number rather than a locked screen. Both are fine for
-proving the spine, and both are what §7 adds next.
+Datetimes are parsed with `Date.UTC` from the naive ISO fields, not with
+`Date.parse`. That avoids reading them as local time (§7). It also avoids
+six-digit fractions, which the language's date format does not define, so
+engines may reject them. Game time is displayed in the browser's locale and time
+zone, which is what the Odoo web client uses for record datetimes.
 
-**Development:** `npm run dev`, Vite on `:5173`, proxying `/game`, `/game/api`
-and `/websocket` (with `ws: true`) to `:8069`. The browser talks only to Vite:
-no CORS, the session cookie is same-origin, and the websocket upgrade rides the
-same proxy.
+Still **no interpolation and no lock**: the clock steps forward by `rate` game
+seconds on each pulse (~1 s) rather than sweeping, and a loop that dies while
+the socket stays open shows as a frozen number still labelled *Running*. Both
+are what §7 adds next.
 
-**Production:** `npm run build` into `addons/odoo_sim/static/dist/`. Filenames
-must be content-hashed — `STATIC_CACHE` is seven days (`odoo/http.py:334`), so
-an unhashed `main.js` will be stale in every browser that has seen it. Vite
-hashes by default; the point is not to turn it off.
+**Development:** `npm run dev` serves `ui/index.html` on `:5173` and proxies
+`/game/api` and `/websocket` (with `ws: true`) to `ODOO_URL`, default
+`http://localhost:8069`. Open the Vite URL directly. Odoo's `/game` is not
+involved, so `index.html` stands in for the bootstrap blob with hand-written
+values that can drift from the server's. Log in on Odoo's own port first: the
+session cookie carries over because cookies ignore the port.
+
+**Production:** `npm run build` into `addons/odoo_sim/static/dist/`, which is
+gitignored, so a fresh checkout shows the "not built" fallback until someone
+builds. The build's only input is `src/main.js`, the key the controller looks
+up in the manifest. Filenames must be content-hashed — `STATIC_CACHE` is seven
+days (`odoo/http.py:334`), so an unhashed `main.js` will be stale in every
+browser that has seen it. Vite hashes by default; the point is not to turn it
+off.
+
+**Tests:** `npm test`, which is `node --test` with no DOM and no extra
+dependencies. `world.js` takes its `WebSocket` and `fetch` as arguments, and
+`view.js` splits the decision (`describe`, pure) from the DOM writes, so the
+tests drive both by hand.
 
 ### 5.5 Game state, when it comes — not milestone 1
 
@@ -354,14 +397,16 @@ treatment with measurements is in git history (commits `6798594a`, `206f54b8`,
   `GameClock.game_at` does. This is why the payload already carries `rate`,
   `last_tick_real`, `max_gap` and `server_real_now`.
 
-- **Parse timestamps as UTC, explicitly.** `pulse.payload` emits naive ISO
-  strings with no offset (`"2026-09-12T22:38:10.473543"`). JavaScript parses a
-  date-*time* with no offset as **local time**. The clock still ticks at the
-  right rate (the offset cancels in a difference) but the displayed absolute
-  time is wrong by the browser's UTC offset × `K` — up to hundreds of game
-  days. Append `Z` at the parse boundary, once. Do not use Odoo's
-  `deserializeDateTime` (it is `fromSQL`, and it also converts to the user's
-  timezone).
+- **Parse timestamps as UTC, explicitly — already done** in
+  `ui/src/reading.js`, because even a stepping clock displays an absolute time.
+  `pulse.payload` emits naive ISO strings with no offset
+  (`"2026-09-12T22:38:10.473543"`). JavaScript parses a date-*time* with no
+  offset as **local time**. An interpolating clock would still tick at the right
+  rate (the offset cancels in a difference), but the displayed absolute time
+  would be wrong by the browser's UTC offset × `K` — up to hundreds of game
+  days. Interpolation must go through `parseInstant` for `last_tick_real` and
+  `server_real_now` too. Do not use Odoo's `deserializeDateTime` (it is
+  `fromSQL`, and it also converts to the user's timezone).
 
 - **Lock when the pulse stops.** Because the clock is an accumulator, a browser
   interpolating from a stale basis cannot tell a stopped clock from a running
@@ -393,8 +438,8 @@ treatment with measurements is in git history (commits `6798594a`, `206f54b8`,
 | 3 | `pulse.py` — `odoo_sim.pulse` on `odoo_sim.world`, every tick | **done** |
 | 4 | `controllers/main.py` — `GET /game`, `GET /game/api/clock` | **done** |
 | 5 | `views/index.xml` — standalone template + unbuilt fallback | **done** |
-| 6 | `odoo_sim/ui/` — Vite vanilla JS: read the blob, subscribe to `odoo_sim.world`, step `game_now` into a div from each pulse, fetch on cold start and reconnect | **to build** |
-| 7 | tests (below) | partly done |
+| 6 | `odoo_sim/ui/` — Vite vanilla JS: read the blob, subscribe to `odoo_sim.world`, step `game_now` into a div from each pulse, fetch on cold start and reconnect | **done** |
+| 7 | tests (below) | **done** |
 
 Tests, in `addons/odoo_sim/tests/`:
 
@@ -402,12 +447,26 @@ Tests, in `addons/odoo_sim/tests/`:
   (`test_controllers.py`);
 - the clock still returns game time after a tick has run — **done**;
 - the page renders, and renders the fallback when nothing is built — **done**;
-- once the frontend exists: it parses a payload whose microseconds are zero
-  (Python's `isoformat()` drops the fractional part when it is zero), it
-  displays the `game_now` from a pulse message, and it falls back to the fetch
-  when the socket closes.
+- the page's blob carries the bus's websocket version — **done**.
 
-Run: `odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim --stop-after-init`.
+And in `odoo_sim/ui/test/`, all **done**:
+
+- it parses a payload whose microseconds are zero (Python's `isoformat()` drops
+  the fractional part when it is zero), and parses as UTC in a far-off zone;
+- it displays the `game_now` from a pulse message;
+- it falls back to the fetch when the socket closes, reconnects with `last: 0`,
+  and drops a fetch that a pulse overtook;
+- it backs off, stops on an expired session or an outdated version, and says
+  *unreachable* only when the socket and the fetch have both failed.
+
+Run: `odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim --stop-after-init`,
+and `npm test` in `odoo_sim/ui/`.
+
+Checked by hand in headless Chrome against a `--rate 1440` world: the clock
+steps about 24 game minutes a second. `sim_pause` shows *Paused* within a tick,
+and resuming continues from the same instant. `kill -9` of `game_run` shows
+*Cannot reach the server*, and a restart reconnects on its own. The same run
+passes through `npm run dev`.
 
 **Verifiable in one sentence:** on a world at `--rate 1440`, `/game` shows a
 clock that advances about a day a minute, in one-second steps.

@@ -1,0 +1,4 @@
+/node_modules/
+# Odoo's root .gitignore drops these everywhere; this project needs them.
+!/package.json
+!/package-lock.json
