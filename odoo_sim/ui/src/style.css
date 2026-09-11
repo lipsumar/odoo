@@ -1,0 +1,78 @@
+:root {
+    color-scheme: light dark;
+    --ground: #f7f7f5;
+    --ink: #1c1c1a;
+    --muted: #6b6b66;
+    --wait: #8a6d1f;
+    --fault: #b3261e;
+    font: 16px/1.5 system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --ground: #161615;
+        --ink: #ecece8;
+        --muted: #9a9a94;
+        --wait: #e0b94f;
+        --fault: #f2877f;
+    }
+}
+
+html,
+body {
+    height: 100%;
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+}
+
+#game {
+    display: grid;
+    place-items: center;
+    min-height: 100%;
+    padding-inline: 1rem;
+}
+
+.clock {
+    text-align: center;
+}
+
+.clock-time {
+    display: block;
+    font-size: clamp(3rem, 14vw, 7rem);
+    font-weight: 300;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+}
+
+.clock-date {
+    margin: 0.25rem 0 0;
+    font-size: 1.25rem;
+}
+
+.clock-world {
+    margin: 1.5rem 0 0;
+    color: var(--muted);
+}
+
+.clock[data-state="paused"] .clock-time,
+.clock[data-state="stopped"] .clock-time {
+    color: var(--muted);
+}
+
+.clock-link {
+    margin: 0.5rem 0 0;
+}
+
+.clock-link[data-tone="wait"] {
+    color: var(--wait);
+}
+
+.clock-link[data-tone="fault"] {
+    color: var(--fault);
+}
+
+.clock-link a {
+    color: inherit;
+}

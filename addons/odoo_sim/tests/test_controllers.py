@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from odoo import game_clock
+from odoo.addons.bus.websocket import WebsocketConnectionHandler
 from odoo.addons.odoo_sim import pulse
 from odoo.addons.odoo_sim.controllers import main
 from odoo.game_clock import GameClock
@@ -195,6 +196,8 @@ class TestGameUi(HttpCase):
 
         self.assertEqual(bootstrap['channel'], pulse.CHANNEL)
         self.assertEqual(bootstrap['type'], pulse.TYPE)
+        # the bus shuts a browser's socket unless it quotes this back
+        self.assertEqual(bootstrap['websocket_version'], WebsocketConnectionHandler._VERSION)
         self.assertEqual(set(bootstrap['clock']), set(pulse.payload(clock)))
         self.assertEqual(bootstrap['clock']['game_now'], GAME_NOW.isoformat())
 

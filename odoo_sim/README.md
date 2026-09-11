@@ -98,8 +98,22 @@ odoo-bin -d mygame -i odoo_sim --stop-after-init
 ```
 
 Then `game_run` serves the game page at `http://localhost:8069/game` alongside
-the ordinary web client. Until the frontend is built the page says so and tells
-you how; the clock endpoint works either way.
+the ordinary web client. The page is a Vite build that is not checked in, so
+build it once (Node 20.19+ or 22.12+):
+
+```bash
+cd odoo_sim/ui
+npm install
+npm run build      # writes addons/odoo_sim/static/dist/
+```
+
+Until you do, `/game` says the frontend is not built and tells you how. The
+clock endpoint works either way.
+
+To work on the frontend, run `npm run dev` there instead and open
+`http://localhost:5173/`. That is Vite's own page, with hot reload, talking to
+Odoo's API and bus through a proxy. Log in on `:8069` first. Set `ODOO_URL` if
+Odoo is not on `http://localhost:8069`. `npm test` runs the frontend's tests.
 
 `bus` is the one module the loop actually uses, for the world pulse, and it
 installs itself: it is `auto_install`, so it arrives as soon as `web` does, and
