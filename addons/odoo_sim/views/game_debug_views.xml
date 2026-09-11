@@ -3,9 +3,10 @@
 
 <!--
     A window onto the world for whoever is developing the game: Settings >
-    Technical > Game World, in debug mode, for administrators, read-only.
+    Technical > Game World, in debug mode, for administrators, read-only,
+    the game bank included.
     Nobody has write access to these models; the game writes them through
-    sudo() from its own endpoints and crons (GAME_STATE.md 9).
+    sudo() from its own endpoints and crons (GAME_STATE.md 11).
 -->
 
 <record id="game_stock_view_list" model="ir.ui.view">
@@ -31,6 +32,7 @@
             <field name="uom_id"/>
             <field name="production_id"/>
             <field name="shipment_id"/>
+            <field name="customer_order_id"/>
         </list>
     </field>
 </record>
@@ -71,6 +73,87 @@
             <field name="product_id"/>
             <field name="duration"/>
             <field name="line_ids" widget="many2many_tags"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_bank_account_view_list" model="ir.ui.view">
+    <field name="model">game.bank.account</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="number"/>
+            <field name="partner_id"/>
+            <field name="balance"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="journal_id"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_bank_transaction_view_list" model="ir.ui.view">
+    <field name="model">game.bank.transaction</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date"/>
+            <field name="kind"/>
+            <field name="payer_id"/>
+            <field name="payee_id"/>
+            <field name="amount"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="reference"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_customer_view_list" model="ir.ui.view">
+    <field name="model">game.customer</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="partner_id"/>
+            <field name="product_id"/>
+            <field name="qty"/>
+            <field name="max_price"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="payment_delay"/>
+            <field name="interval"/>
+            <field name="next_order_date"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_customer_order_view_list" model="ir.ui.view">
+    <field name="model">game.customer.order</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date_requested"/>
+            <field name="customer_id"/>
+            <field name="product_id"/>
+            <field name="qty"/>
+            <field name="state"/>
+            <field name="qty_paid"/>
+            <field name="amount_paid"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="date_paid"/>
+            <field name="date_delivered"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_customer_invoice_view_list" model="ir.ui.view">
+    <field name="model">game.customer.invoice</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date_received"/>
+            <field name="customer_id"/>
+            <field name="name"/>
+            <field name="invoice_id"/>
+            <field name="qty"/>
+            <field name="amount"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="state"/>
+            <field name="reason"/>
+            <field name="date_due"/>
+            <field name="transaction_id"/>
         </list>
     </field>
 </record>
@@ -144,6 +227,26 @@
     <field name="name">Deliveries</field>
     <field name="res_model">game.email.delivery</field>
 </record>
+<record id="game_bank_account_action" model="ir.actions.act_window">
+    <field name="name">Bank accounts</field>
+    <field name="res_model">game.bank.account</field>
+</record>
+<record id="game_bank_transaction_action" model="ir.actions.act_window">
+    <field name="name">Bank transactions</field>
+    <field name="res_model">game.bank.transaction</field>
+</record>
+<record id="game_customer_action" model="ir.actions.act_window">
+    <field name="name">Customers</field>
+    <field name="res_model">game.customer</field>
+</record>
+<record id="game_customer_order_action" model="ir.actions.act_window">
+    <field name="name">Customer orders</field>
+    <field name="res_model">game.customer.order</field>
+</record>
+<record id="game_customer_invoice_action" model="ir.actions.act_window">
+    <field name="name">Invoices received</field>
+    <field name="res_model">game.customer.invoice</field>
+</record>
 
 <menuitem id="menu_game_world" name="Game World" parent="base.menu_custom" sequence="200">
     <menuitem id="menu_game_stock" action="game_stock_action" sequence="10"/>
@@ -153,6 +256,11 @@
     <menuitem id="menu_game_recipe" action="game_recipe_action" sequence="50"/>
     <menuitem id="menu_game_workstation" action="game_workstation_action" sequence="60"/>
     <menuitem id="menu_game_vendor" action="game_vendor_action" sequence="70"/>
+    <menuitem id="menu_game_bank_account" action="game_bank_account_action" sequence="80"/>
+    <menuitem id="menu_game_bank_transaction" action="game_bank_transaction_action" sequence="90"/>
+    <menuitem id="menu_game_customer" action="game_customer_action" sequence="100"/>
+    <menuitem id="menu_game_customer_order" action="game_customer_order_action" sequence="110"/>
+    <menuitem id="menu_game_customer_invoice" action="game_customer_invoice_action" sequence="120"/>
     <menuitem id="menu_game_email" action="game_email_action" sequence="130"/>
     <menuitem id="menu_game_email_delivery" action="game_email_delivery_action" sequence="140"/>
 </menuitem>

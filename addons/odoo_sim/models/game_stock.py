@@ -10,12 +10,13 @@ from odoo.exceptions import UserError
 from odoo.tools import SQL, float_is_zero, float_round
 
 #: Why a quantity entered or left the world.  Appended to as domains join the
-#: game: a sale delivery will be the first thing that takes goods *out*.
+#: game.
 KINDS = [
     ('genesis', "Genesis"),
     ('manufactured', "Manufactured"),
     ('consumed', "Consumed"),
     ('received', "Received"),
+    ('delivered', "Delivered"),
 ]
 
 
@@ -49,7 +50,7 @@ class GameStock(models.Model):
     )
 
     @api.model
-    def _apply(self, product, qty, kind, *, date=None, production=None, shipment=None):
+    def _apply(self, product, qty, kind, *, date=None, production=None, shipment=None, customer_order=None):
         """ Change how much of ``product`` exists by ``qty``, and record why.
 
         **The only write path into reality.**  Everything that makes goods
@@ -60,7 +61,8 @@ class GameStock(models.Model):
         ``qty`` is signed, in the product's own unit.  ``date`` is the game
         instant the event happened, which is not always now -- a production run
         that finished at 14:00 and was settled by a cron at 14:07 happened at
-        14:00.  ``production`` / ``shipment`` name the world event responsible.
+        14:00.  ``production`` / ``shipment`` / ``customer_order`` name the world
+        event responsible.
 
         Raises ``UserError`` rather than taking more than exists.
         """
@@ -107,6 +109,7 @@ class GameStock(models.Model):
             'kind': kind,
             'production_id': production.id if production else False,
             'shipment_id': shipment.id if shipment else False,
+            'customer_order_id': customer_order.id if customer_order else False,
         })
 
 
@@ -127,3 +130,5 @@ class GameStockEntry(models.Model):
         'game.production', "Production run", readonly=True, index='btree_not_null', ondelete='restrict')
     shipment_id = fields.Many2one(
         'game.shipment', "Shipment", readonly=True, index='btree_not_null', ondelete='restrict')
+    customer_order_id = fields.Many2one(
+        'game.customer.order', "Customer order", readonly=True, index='btree_not_null', ondelete='restrict')

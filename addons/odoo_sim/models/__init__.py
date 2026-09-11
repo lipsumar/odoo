@@ -7,3 +7,6 @@ from . import game_mail
 from . import ir_mail_server
 from . import fetchmail
 from . import purchase_order
+from . import game_bank
+from . import account_bank_feed
+from . import game_customer

@@ -1,7 +1,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """The world as a whole: time-driven events, the page's view of it, and genesis.
 
-See ``odoo_sim/GAME_STATE.md`` sections 3.3, 7 and 8.
+See ``odoo_sim/GAME_STATE.md`` sections 3.3, 9 and 10.
 """
 from odoo import api, fields, models
 from odoo.tools import SQL
@@ -16,6 +16,9 @@ CHANGED = 'odoo_sim.world_changed'
 
 #: Manufacturing orders a workstation offers to link a run to.
 OPEN_MO_STATES = ('confirmed', 'progress', 'to_close')
+
+#: How many of the company's bank transactions the page shows.
+BANK_LINES = 10
 
 
 def _instant(value):
@@ -34,10 +37,11 @@ class GameWorld(models.AbstractModel):
         """ Make everything that was due by ``now`` (game time) have happened.
 
         Runs that have ended put their goods into the world; shipments whose
-        arrival time has passed are at the door.  Run by a cron triggered at
-        each due instant, and at the start of every player action, so that an
-        action always sees the world as of the moment it was taken -- the cron
-        alone lags by up to one cron tick (``cron-tick x rate`` game seconds).
+        arrival time has passed are at the door; customers pay the invoices
+        they agreed to pay.  Run by a cron triggered at each due instant, and
+        at the start of every player action, so that an action always sees
+        the world as of the moment it was taken -- the cron alone lags by up to
+        one cron tick (``cron-tick x rate`` game seconds).
 
         Rows another transaction is already settling are skipped rather than
         waited on; that transaction will finish them.
@@ -47,9 +51,11 @@ class GameWorld(models.AbstractModel):
         runs._finish()
         shipments = self._lock_due('game.shipment', 'in_transit', 'date_arrival', now)
         shipments.state = 'arrived'
-        if runs or shipments:
+        invoices = self._lock_due('game.customer.invoice', 'to_pay', 'date_due', now)
+        invoices._pay()
+        if runs or shipments or invoices:
             self._changed()
-        return runs, shipments
+        return runs, shipments, invoices
 
     def _lock_due(self, model, state, date_field, now):
         records = self.env[model]
@@ -117,7 +123,9 @@ class GameWorld(models.AbstractModel):
 
     @api.model
     def _snapshot(self, user=None):
-        """ The whole world, as ``GET /game/api/world`` hands it to the page.
+        """ The whole world, as ``GET /game/api/world`` hands it to the page:
+        what exists, the workstations, deliveries on their way, the company's
+        bank account, and what customers have on order.
 
         One projection for one screen (UI_DESIGN.md 9.4), not a generic read.
         Datetimes are naive UTC ISO, exactly as in the pulse, so the page
@@ -130,15 +138,21 @@ class GameWorld(models.AbstractModel):
         vendors = self.env['game.vendor'].search([])
         running = self.env['game.production'].search([('state', '=', 'running')])
         shipments = self.env['game.shipment'].search([('state', '!=', 'accepted')])
+        customers = self.env['game.customer'].search([])
+        customer_orders = self.env['game.customer.order'].search([('state', '!=', 'delivered')])
         balances = self.env['game.stock'].search([])
+        # Read, never opened: this is a GET, and a pure read.
+        account = self.env['game.bank.account'].search(
+            [('partner_id', '=', self.env.company.partner_id.id)], limit=1)
 
-        # Everything the world knows how to make, use or buy is listed even at
-        # zero: an empty shelf is worth seeing.
+        # Everything the world knows how to make, use, buy or sell is listed
+        # even at zero: an empty shelf is worth seeing.
         products = (
             balances.product_id
             | workstations.recipe_id.product_id
             | workstations.recipe_id.line_ids.product_id
             | vendors.product_ids
+            | customers.product_id
         )
         on_hand = {balance.product_id: balance.qty for balance in balances}
 
@@ -155,6 +169,30 @@ class GameWorld(models.AbstractModel):
                 'date_end': _instant(record.date_end),
                 'order': {'id': record.production_id.id, 'name': record.production_id.name}
                 if record.production_id else None,
+            }
+
+        def invoice(record):
+            if not record:
+                return None
+            return {
+                'id': record.id,
+                'name': record.name,
+                'amount': record.amount,
+                'qty': record.qty,
+                'state': record.state,
+                'reason': record.reason or None,
+                'date_due': _instant(record.date_due),
+            }
+
+        def transaction(record):
+            incoming = record.payee_id == account
+            other = record.payer_id if incoming else record.payee_id
+            return {
+                'id': record.id,
+                'date': _instant(record.date),
+                'amount': record.amount if incoming else -record.amount,
+                'counterparty': other.partner_id.display_name if other else None,
+                'reference': record.reference or None,
             }
 
         orders = self.env['mrp.production'].search([
@@ -191,6 +229,26 @@ class GameWorld(models.AbstractModel):
                 'date_arrival': _instant(shipment.date_arrival),
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in shipment.line_ids],
             } for shipment in shipments],
+            'bank': {
+                'number': account.number,
+                'balance': account.balance,
+                'currency': account.currency_id.name,
+                'transactions': [transaction(record) for record in account._statement(limit=BANK_LINES)],
+            } if account else None,
+            'customer_orders': [{
+                'id': order.id,
+                'customer': order.partner_id.display_name,
+                'product': product(order.product_id),
+                'qty': order.qty,
+                'max_price': order.max_price,
+                'currency': order.currency_id.name,
+                'state': order.state,
+                'date_requested': _instant(order.date_requested),
+                'qty_paid': order.qty_paid,
+                'amount_paid': order.amount_paid,
+                # The newest: game.customer.invoice is ordered newest first.
+                'invoice': invoice(order.invoice_ids[:1]),
+            } for order in customer_orders],
         }
         if user is not None:
             snapshot['mail'] = self.env['game.email']._mailbox(user)

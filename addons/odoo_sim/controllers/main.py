@@ -116,7 +116,7 @@ class GameUi(http.Controller):
         and that value changes whenever the bus's client does.
 
         So does the world: its first state, and the type of the notice that
-        says it changed (GAME_STATE.md 8).
+        says it changed (GAME_STATE.md 10).
         """
         scripts, styles = _built_assets()
         return request.render('odoo_sim.index', {

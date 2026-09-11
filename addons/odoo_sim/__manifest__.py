@@ -1,6 +1,6 @@
 {
     'name': "Odoo Sim",
-    'version': '1.1',
+    'version': '1.2',
     'category': 'Hidden',
     'summary': "Game world runtime: the loop that drives an accelerated Odoo, and the world it drives",
     'description': """
@@ -13,13 +13,14 @@ works whether or not this module is installed on the database.
 The **UI is the exception**: routes and templates come from the registry, so
 ``/game`` and ``/game/api/clock`` exist only once this module is installed.
 
-It also holds the game world's own state -- what physically exists, as opposed
-to what Odoo records -- in ``game.*`` models that only the game writes.
+It also holds the game world's own state -- what physically exists, and the
+money in the game bank, as opposed to what Odoo records -- in ``game.*``
+models that only the game writes.
 
 See ``odoo_sim/DESIGN.md``, ``odoo_sim/UI_DESIGN.md`` and
 ``odoo_sim/GAME_STATE.md`` at the root of the repository.
     """,
-    'depends': ['base', 'bus', 'mrp', 'purchase_stock'],
+    'depends': ['base', 'bus', 'mrp', 'purchase_stock', 'sale_stock'],
     'data': [
         'security/ir.model.access.csv',
         'data/ir_cron.xml',

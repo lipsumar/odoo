@@ -30,6 +30,12 @@
         <field name="email">orders@tensile-wire.example.com</field>
     </record>
 
+    <record id="partner_customer" model="res.partner">
+        <field name="name">Binder &amp; Co.</field>
+        <field name="is_company" eval="True"/>
+        <field name="email">purchasing@binder-co.example.com</field>
+    </record>
+
     <record id="product_wire" model="product.product">
         <field name="name">Wire</field>
         <field name="is_storable" eval="True"/>
@@ -103,6 +109,28 @@
         <field name="product_ids" eval="[Command.link(ref('product_wire'))]"/>
     </record>
 
+    <!--
+        Buys 200 paperclips at a time and pays up to 0.08 for each, taxes
+        included; pays four game hours after it agrees with an invoice, and
+        asks again a game day after it has its goods.  It starts with 1000 in
+        the bank; the company starts with nothing.
+    -->
+    <record id="customer_binder" model="game.customer">
+        <field name="partner_id" ref="partner_customer"/>
+        <field name="product_id" ref="product_paperclip"/>
+        <field name="qty">200</field>
+        <field name="max_price">0.08</field>
+        <field name="payment_delay">4</field>
+        <field name="interval">24</field>
+    </record>
+
 </data>
+
+<!--
+    Binder & Co.'s money.  Outside noupdate, so that a world upgrading into
+    this scenario gets it too; _open deposits only into an account that has
+    never moved, so it happens once.
+-->
+<function model="game.bank.account" name="_open" eval="[ref('partner_customer'), 1000.0]"/>
 
 </odoo>

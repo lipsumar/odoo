@@ -2,7 +2,7 @@
 """The game world's HTTP surface: read it, and act in it.
 
 Every action is a write into reality, so every action is guarded twice (see
-``odoo_sim/GAME_STATE.md`` section 8):
+``odoo_sim/GAME_STATE.md`` section 10):
 
 * internal users only -- ``auth='user'`` alone would admit portal users;
 * ``game_clock.is_running``, because a dead or paused world would accept a run
@@ -73,4 +73,12 @@ class GameWorld(http.Controller):
         """ Accept a delivery at the door: its contents now exist. """
         world = _acting()
         _existing(world, 'game.shipment', shipment_id)._accept()
+        return world._snapshot(request.env.user)
+
+    @http.route('/game/api/customer_orders/<int:order_id>/deliver',
+                type='json2', auth='user', methods=['POST'])
+    def deliver(self, order_id):
+        """ Ship a paid order: its goods leave the world, for the customer. """
+        world = _acting()
+        _existing(world, 'game.customer.order', order_id)._deliver()
         return world._snapshot(request.env.user)
