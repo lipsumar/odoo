@@ -16,6 +16,7 @@ import logging
 import werkzeug.exceptions
 
 from odoo import game_clock, http
+from odoo.addons.bus.websocket import WebsocketConnectionHandler
 from odoo.addons.odoo_sim import pulse
 from odoo.http import request
 from odoo.tools import file_open
@@ -106,6 +107,11 @@ class GameUi(http.Controller):
           than being spelled a second time in JavaScript.  Two copies of a
           channel name drift, and the symptom when they do is not an error but
           a UI that quietly never updates.
+
+        The bus's client version rides along for the same reason.  ``/websocket``
+        closes a browser's socket on sight unless its ``version`` parameter
+        names the bus's own worker (``WebsocketConnectionHandler._VERSION``),
+        and that value changes whenever the bus's client does.
         """
         scripts, styles = _built_assets()
         return request.render('odoo_sim.index', {
@@ -113,6 +119,7 @@ class GameUi(http.Controller):
                 'clock': pulse.payload(_world_clock()),
                 'channel': pulse.CHANNEL,
                 'type': pulse.TYPE,
+                'websocket_version': WebsocketConnectionHandler._VERSION,
             },
             'scripts': scripts,
             'styles': styles,
