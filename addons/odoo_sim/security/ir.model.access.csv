@@ -8,3 +8,5 @@ access_game_production_debug,game.production debug,model_game_production,base.gr
 access_game_vendor_debug,game.vendor debug,model_game_vendor,base.group_system,1,0,0,0
 access_game_shipment_debug,game.shipment debug,model_game_shipment,base.group_system,1,0,0,0
 access_game_shipment_line_debug,game.shipment.line debug,model_game_shipment_line,base.group_system,1,0,0,0
+access_game_email_debug,game.email debug,model_game_email,base.group_system,1,0,0,0
+access_game_email_delivery_debug,game.email.delivery debug,model_game_email_delivery,base.group_system,1,0,0,0

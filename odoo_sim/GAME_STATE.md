@@ -3,7 +3,8 @@
 Status: built for manufacturing and purchasing, with the paperclip scenario (§10)
 Branch: `odoo-sim`
 Target: Odoo 19.0
-Companion to `DESIGN.md` (the clock) and `UI_DESIGN.md` (the page).
+Companion to `DESIGN.md` (the clock), `UI_DESIGN.md` (the page) and `MAIL.md`
+(email, which never leaves a world).
 
 ## 1. Problem
 
@@ -23,8 +24,8 @@ models and never defines. v1 covers two ways goods come into the world:
   arrives after the vendor's lead time; the player accepts it at the door.
   Validating the receipt in Odoo comes after, if at all.
 
-Later, autonomous employees will press the same buttons. Emails between the
-player and the vendor are out of scope.
+Later, autonomous employees will press the same buttons. Email is a system of
+its own (`MAIL.md`); the vendor does not read it yet.
 
 ## 2. The rule
 
@@ -278,6 +279,9 @@ real minutes.
 ## 12. Out of scope, and next
 
 - Checkpoints comparing reality against Odoo.
+- Vendors that read their email. A purchase order the player sends by email
+  already reaches the vendor's mailbox (`MAIL.md` §8); only the vendor agent's
+  trigger has to move (§6.1).
 - Goods leaving the world: sale deliveries (a new `kind`), scrap.
 - Locations: `(product, place)` as the balance key, for the dock, the shelves
   and the station, which is what the graphics will want.

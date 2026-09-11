@@ -104,6 +104,47 @@
     <field name="res_model">game.vendor</field>
 </record>
 
+<record id="game_email_view_list" model="ir.ui.view">
+    <field name="model">game.email</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date"/>
+            <field name="origin"/>
+            <field name="email_from"/>
+            <field name="email_to"/>
+            <field name="subject"/>
+            <field name="preview" optional="hide"/>
+            <field name="res_model" optional="hide"/>
+            <field name="res_id" optional="hide"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_email_delivery_view_list" model="ir.ui.view">
+    <field name="model">game.email.delivery</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date"/>
+            <field name="email_id"/>
+            <field name="address"/>
+            <field name="route"/>
+            <field name="user_id"/>
+            <field name="state"/>
+            <field name="is_read" optional="hide"/>
+            <field name="failure"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_email_action" model="ir.actions.act_window">
+    <field name="name">Post</field>
+    <field name="res_model">game.email</field>
+</record>
+<record id="game_email_delivery_action" model="ir.actions.act_window">
+    <field name="name">Deliveries</field>
+    <field name="res_model">game.email.delivery</field>
+</record>
+
 <menuitem id="menu_game_world" name="Game World" parent="base.menu_custom" sequence="200">
     <menuitem id="menu_game_stock" action="game_stock_action" sequence="10"/>
     <menuitem id="menu_game_stock_entry" action="game_stock_entry_action" sequence="20"/>
@@ -112,6 +153,8 @@
     <menuitem id="menu_game_recipe" action="game_recipe_action" sequence="50"/>
     <menuitem id="menu_game_workstation" action="game_workstation_action" sequence="60"/>
     <menuitem id="menu_game_vendor" action="game_vendor_action" sequence="70"/>
+    <menuitem id="menu_game_email" action="game_email_action" sequence="130"/>
+    <menuitem id="menu_game_email_delivery" action="game_email_delivery_action" sequence="140"/>
 </menuitem>
 
 </odoo>

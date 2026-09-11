@@ -116,12 +116,15 @@ class GameWorld(models.AbstractModel):
     # -- what the page shows -----------------------------------------------
 
     @api.model
-    def _snapshot(self):
+    def _snapshot(self, user=None):
         """ The whole world, as ``GET /game/api/world`` hands it to the page.
 
         One projection for one screen (UI_DESIGN.md 9.4), not a generic read.
         Datetimes are naive UTC ISO, exactly as in the pulse, so the page
         parses both with one function.
+
+        Given ``user``, it carries their mail too (``mail``, MAIL.md): the page
+        is one player's view of the world, and their inbox is on it.
         """
         workstations = self.env['game.workstation'].search([])
         vendors = self.env['game.vendor'].search([])
@@ -159,7 +162,7 @@ class GameWorld(models.AbstractModel):
             ('state', 'in', OPEN_MO_STATES),
         ], order='date_start, id')
 
-        return {
+        snapshot = {
             'stock': [
                 dict(product(record), qty=on_hand.get(record, 0.0))
                 for record in products.sorted('display_name')
@@ -189,3 +192,6 @@ class GameWorld(models.AbstractModel):
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in shipment.line_ids],
             } for shipment in shipments],
         }
+        if user is not None:
+            snapshot['mail'] = self.env['game.email']._mailbox(user)
+        return snapshot

@@ -2,8 +2,9 @@
 
 How to create, drive, pause and stop an odoo-sim world. For *why* any of it
 works this way, see [DESIGN.md](DESIGN.md) (the clock),
-[UI_DESIGN.md](UI_DESIGN.md) (the page) and [GAME_STATE.md](GAME_STATE.md)
-(what exists in the world, as opposed to what Odoo records).
+[UI_DESIGN.md](UI_DESIGN.md) (the page), [GAME_STATE.md](GAME_STATE.md)
+(what exists in the world, as opposed to what Odoo records) and
+[MAIL.md](MAIL.md) (email, which never leaves a world).
 
 The one idea worth having up front: **game time is not derived from the clock
 on the wall.** It is a number in a table that the game loop pushes forward. No
@@ -224,6 +225,34 @@ Then, at `http://localhost:8069`:
 To see what the world holds, rather than what Odoo says it holds, turn on
 debug mode and open *Settings → Technical → Game World*: the balance, the
 ledger of every real event, the runs and the shipments, all read-only.
+
+---
+
+## Email
+
+**A world's email never leaves it, and no real email comes in**
+([MAIL.md](MAIL.md)). Odoo still sends everything it normally would. The game
+catches it where it would have reached a mail server, and delivers it inside
+the world according to the address:
+
+- **an employee's address** goes to their inbox, under *Mail* on `/game`,
+  where they can read it, reply and write new mail;
+- **one of Odoo's aliases, or anything on an alias domain** goes to Odoo's own
+  mail gateway, as if fetchmail had brought it in. An alias creates its record,
+  and a reply lands on the chatter of the record it answers;
+- **anyone else** goes to a mailbox outside the company, where the world's
+  agents will read it.
+
+There is nothing to set up for SMTP. A configured outgoing server is simply
+never used, and an incoming one fetches nothing. For aliases and replies, the
+company needs an alias domain, as in any Odoo: *Settings → General Settings →
+Alias Domain*. Your address is your user's email, and *Notification: By
+Emails* in your preferences sends Odoo's notifications to the game inbox
+rather than to Discuss.
+
+In debug mode, *Settings → Technical → Game World → Post* lists every email
+sent in the world, and *Deliveries* shows where each copy went, including
+anything Odoo's gateway refused and why.
 
 ---
 

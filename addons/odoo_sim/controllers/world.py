@@ -53,7 +53,7 @@ class GameWorld(http.Controller):
         and the page draws it as finishing.  Actions settle before they act,
         so none of them ever works from that stale view.
         """
-        return _world()._snapshot()
+        return _world()._snapshot(request.env.user)
 
     @http.route('/game/api/workstations/<int:workstation_id>/start',
                 type='json2', auth='user', methods=['POST'])
@@ -65,7 +65,7 @@ class GameWorld(http.Controller):
             raise UserError(world.env._("A run makes a positive quantity."))
         order = _existing(world, 'mrp.production', production_id) if production_id else None
         station._start(qty, order)
-        return world._snapshot()
+        return world._snapshot(request.env.user)
 
     @http.route('/game/api/shipments/<int:shipment_id>/accept',
                 type='json2', auth='user', methods=['POST'])
@@ -73,4 +73,4 @@ class GameWorld(http.Controller):
         """ Accept a delivery at the door: its contents now exist. """
         world = _acting()
         _existing(world, 'game.shipment', shipment_id)._accept()
-        return world._snapshot()
+        return world._snapshot(request.env.user)

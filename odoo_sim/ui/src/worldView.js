@@ -102,7 +102,7 @@ export function describeWorld({ world, reading, pending = new Set(), error = nul
     };
 }
 
-function element(tag, className, text) {
+export function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) {
         node.className = className;
@@ -124,7 +124,7 @@ function panel(title, ...children) {
  * nodes are updated in place and only moved when the list itself changed, so
  * a focused input or a half-pressed button survives a render.
  */
-function keyed(container, items, create, update) {
+export function keyed(container, items, create, update) {
     const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
     const nodes = items.map((item) => {
         let node = existing.get(String(item.key));

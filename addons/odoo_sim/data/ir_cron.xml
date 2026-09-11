@@ -2,8 +2,9 @@
 <odoo>
 
 <!--
-    Both crons are driven by triggers: the settle cron at each run's end and
-    each shipment's arrival, the vendor agent whenever an order is approved.
+    All three crons are driven by triggers: the settle cron at each run's end
+    and each shipment's arrival, the vendor agent whenever an order is
+    approved, the post office whenever an email is posted (MAIL.md).
     The intervals are a safety net only, and are game hours like every cron
     interval in a world (DESIGN.md 4.3).
 -->
@@ -23,6 +24,17 @@
     <field name="model_id" ref="model_game_vendor"/>
     <field name="state">code</field>
     <field name="code">model._cron_process_orders()</field>
+    <field name="user_id" ref="base.user_root"/>
+    <field name="interval_number">1</field>
+    <field name="interval_type">hours</field>
+</record>
+
+<!-- As root, like Odoo's own fetchmail cron: the gateway runs as whoever hands it the mail. -->
+<record id="ir_cron_post_office" model="ir.cron" forcecreate="True">
+    <field name="name">Game world: deliver the post</field>
+    <field name="model_id" ref="model_game_email_delivery"/>
+    <field name="state">code</field>
+    <field name="code">model._cron_deliver()</field>
     <field name="user_id" ref="base.user_root"/>
     <field name="interval_number">1</field>
     <field name="interval_type">hours</field>

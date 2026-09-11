@@ -125,7 +125,7 @@ class GameUi(http.Controller):
                 'channel': pulse.CHANNEL,
                 'type': pulse.TYPE,
                 'changed_type': CHANGED,
-                'world': _world()._snapshot(),
+                'world': _world()._snapshot(request.env.user),
                 'websocket_version': WebsocketConnectionHandler._VERSION,
             },
             'scripts': scripts,
