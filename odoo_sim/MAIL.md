@@ -227,7 +227,11 @@ class GameEmailDelivery(models.Model):
 ```
 
 Triggering the agent's own cron from here, rather than acting inline, keeps
-it an agent reacting to its mail.
+it an agent reacting to its mail. That is what the customers do
+(`GAME_STATE.md` §7): `_received` wakes their mail cron, which reads each
+customer's unread mail once and hands invoices to `_receive_invoice`. They
+write their orders and refusals with `_send_from`, a refusal threaded under
+the invoice's email.
 
 The vendor agent still ships on confirmation (`GAME_STATE.md` §6.1). A
 purchase order the player sends by email lands in the vendor's outside

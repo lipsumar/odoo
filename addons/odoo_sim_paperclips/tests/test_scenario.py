@@ -10,8 +10,10 @@ Movements, not totals: the database under test may be a world someone has been
 playing in, where Odoo and the world already disagree (DESIGN.md 8).
 """
 from datetime import timedelta
+from unittest.mock import patch
 
 from odoo import Command, fields
+from odoo.addons.base.models.ir_mail_server import IrMail_Server
 from odoo.tests.common import TransactionCase
 
 
@@ -137,17 +139,21 @@ class TestPaperclips(TransactionCase):
         self.assertOdooMovedWithTheWorld()
 
     def test_sell_paperclips_and_get_paid(self):
-        # Binder & Co. asks for paperclips (the customer agent's cron, run by hand).
+        # Binder & Co. emails the player for paperclips (its cron, run by hand).
         wanted = self.customer.order_ids.filtered(lambda o: o.state != 'delivered')
         if wanted.state not in (False, 'requested'):
             self.skipTest("Binder & Co. already has an order under way in this world")
-        wanted = wanted or self.customer._place_order()
+        if not wanted:
+            wanted = self.customer._place_order()
+            request = self.env['game.email'].search([('subject', '=', "Order: 200 Paperclip")], limit=1)
+            self.env['game.email.delivery']._deliver()
+            self.assertEqual(request.delivery_ids.route, 'player', "it lands in the player's inbox")
         self.assertEqual((wanted.product_id, wanted.qty), (self.clip, 200))
 
         self.buy_a_spool()
         self.make_paperclips(wanted.qty)
 
-        # Quote, confirm, invoice.
+        # Quote, confirm, invoice, and send it the way the player would.
         sale = self.env['sale.order'].create({
             'partner_id': self.customer.partner_id.id,
             'order_line': [Command.create({'product_id': self.clip.id, 'product_uom_qty': wanted.qty})],
@@ -155,9 +161,18 @@ class TestPaperclips(TransactionCase):
         sale.action_confirm()
         invoice = sale._create_invoices()
         invoice.action_post()
+        with patch.object(IrMail_Server, '_disable_send', return_value=False), \
+                patch('smtplib.SMTP', side_effect=AssertionError("SMTP")):
+            self.env['account.move.send.wizard'].with_context(
+                active_model='account.move', active_ids=invoice.ids,
+            ).create({}).action_send_and_print()
+            self.env['mail.mail'].search([
+                ('model', '=', 'account.move'), ('res_id', '=', invoice.id), ('state', '=', 'outgoing'),
+            ]).send()
+        self.env['game.email.delivery']._deliver()
 
         # The customer reads the invoice, agrees, and pays when it said it would ...
-        self.customer._cron_read_invoices()
+        self.customer._cron_read_mail()
         received = self.env['game.customer.invoice'].search([('invoice_id', '=', invoice.id)])
         self.assertEqual(received.state, 'to_pay', received.reason)
         self.world._settle(received.date_due)
@@ -169,8 +184,11 @@ class TestPaperclips(TransactionCase):
                          (invoice.amount_total, invoice.payment_reference, self.customer.partner_id))
         self.assertEqual(self.earned(), (invoice.amount_total, invoice.amount_total))
 
-        # ... and the player ships, and records it.
+        # ... and the player ships, and records it -- these 200, whatever else
+        # a played world's open deliveries may have reserved.
         wanted._deliver()
+        for move in sale.picking_ids.move_ids:
+            move.quantity = move.product_uom_qty
         sale.picking_ids.move_ids.picked = True
         sale.picking_ids.button_validate()
         self.assertEqual(wanted.state, 'delivered')

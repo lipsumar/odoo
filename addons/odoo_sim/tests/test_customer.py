@@ -4,12 +4,20 @@
 The test clip is sold without taxes, so an invoice's total is what the tests
 say it is.  Time is never frozen (see test_world): settling is always given an
 instant relative to the record under test.
+
+Customers read their mail: an invoice reaches one by being emailed to it, and
+delivered by the post office.  Under test, ``ir.mail_server._disable_send``
+holds every ``mail.mail`` back, so ``sending()`` lets Odoo send -- into the
+world's post, with a tripwire on SMTP, as in test_mail.
 """
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from odoo import Command, game_clock
+from odoo.addons.base.models.ir_mail_server import IrMail_Server
 from odoo.game_clock import GameClock
-from odoo.tests import tagged
+from odoo.tests import new_test_user, tagged
 from odoo.tests.common import HttpCase
 
 from odoo.addons.odoo_sim.tests.test_bank import BankCase
@@ -21,6 +29,8 @@ class CustomerCase(BankCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.clip.taxes_id = False
+        cls.buyer.email = 'buyer@outside.example.com'
+        cls.seller = new_test_user(cls.env, 'seller', groups='base.group_user', email='seller@company.example.com')
         cls.customer = cls.env['game.customer'].create({
             'partner_id': cls.buyer.id,
             'product_id': cls.clip.id,
@@ -28,8 +38,20 @@ class CustomerCase(BankCase):
             'max_price': 0.10,
             'payment_delay': 4,
             'interval': 24,
+            'write_to': cls.seller.email,
         })
         cls.accounts._deposit(cls.buyer.id, 50)
+        cls.Email = cls.env['game.email']
+        cls.Delivery = cls.env['game.email.delivery']
+
+    @contextmanager
+    def sending(self):
+        """ Let Odoo send, which in a world means posting -- and never SMTP. """
+        tripwire = AssertionError("an SMTP connection was attempted")
+        with patch.object(IrMail_Server, '_disable_send', return_value=False), \
+                patch('smtplib.SMTP', side_effect=tripwire), \
+                patch('smtplib.SMTP_SSL', side_effect=tripwire):
+            yield
 
     def place(self):
         self.customer._cron_place_orders()
@@ -50,12 +72,25 @@ class CustomerCase(BankCase):
     def received(self, invoice):
         return self.env['game.customer.invoice'].search([('invoice_id', '=', invoice.id)])
 
-    def read(self, invoice):
-        self.customer._cron_read_invoices()
+    def send(self, record, partner=None):
+        """ Email ``record`` to the buyer (or ``partner``), and deliver the post. Returns the email. """
+        with self.sending():
+            message = record.message_post(
+                body="<p>Please find it attached.</p>", partner_ids=(partner or self.buyer).ids,
+                message_type='comment', subtype_xmlid='mail.mt_comment',
+            )
+        self.Delivery._deliver()
+        return self.Email.search([('message_id', '=', message.message_id)])
+
+    def read(self, invoice, partner=None):
+        """ Email ``invoice``, and have the customer read its mail. """
+        self.send(invoice, partner)
+        self.customer._cron_read_mail()
         return self.received(invoice)
 
-    def messages(self, subject):
-        return self.buyer.message_ids.filtered(lambda m: m.subject and subject in m.subject)
+    def written(self, subject):
+        """ What the customer has emailed, with ``subject`` in its subject. """
+        return self.Email.search([('email_from', 'ilike', self.buyer.email), ('subject', 'ilike', subject)])
 
     def paid_order(self, qty=100):
         """ An order the customer has asked for, been invoiced and paid for. """
@@ -72,7 +107,23 @@ class TestCustomerOrders(CustomerCase):
 
         self.assertEqual((order.state, order.product_id, order.qty, order.max_price),
                          ('requested', self.clip, 100, 0.10))
-        self.assertTrue(self.messages("Order: 100 Test clip"), "the customer wrote to the company")
+        [email] = self.written("Order: 100 Test clip")
+        self.assertEqual(email.delivery_ids.address, self.seller.email)
+
+    def test_an_order_lands_in_the_players_inbox(self):
+        self.place()
+        self.Delivery._deliver()
+
+        [email] = self.written("Order")
+        self.assertEqual((email.delivery_ids.route, email.delivery_ids.user_id), ('player', self.seller))
+
+    def test_a_customer_with_nowhere_to_write_still_orders(self):
+        self.customer.write_to = False
+        with self.assertLogs('odoo.addons.odoo_sim.models.game_customer', 'WARNING'):
+            order = self.place()
+
+        self.assertEqual(order.state, 'requested', "and the page shows it")
+        self.assertFalse(self.written("Order"))
 
     def test_a_customer_has_one_order_open_at_a_time(self):
         self.place()
@@ -104,12 +155,37 @@ class TestCustomerOrders(CustomerCase):
 
 class TestCustomerInvoices(CustomerCase):
 
-    def test_posting_an_invoice_wakes_the_customers(self):
-        cron = self.env.ref('odoo_sim.ir_cron_customer_invoices')
+    def test_mail_reaching_a_customer_wakes_the_customers(self):
+        cron = self.env.ref('odoo_sim.ir_cron_customer_mail')
         before = self.env['ir.cron.trigger'].search_count([('cron_id', '=', cron.id)])
-        self.invoice()
+        self.send(self.invoice())
 
         self.assertGreater(self.env['ir.cron.trigger'].search_count([('cron_id', '=', cron.id)]), before)
+
+    def test_an_invoice_nobody_sent_is_not_read(self):
+        """ Posting is the player's bookkeeping; sending is telling the customer. """
+        self.place()
+        invoice = self.invoice()
+        self.customer._cron_read_mail()
+
+        self.assertFalse(self.received(invoice))
+
+    def test_an_invoice_emailed_to_someone_else_is_not_read(self):
+        self.place()
+        invoice = self.invoice()
+        invoice.message_unsubscribe(self.buyer.ids)
+        stranger = self.env['res.partner'].create({'name': "Stranger", 'email': 'stranger@outside.example.com'})
+        self.send(invoice, stranger)
+        self.customer._cron_read_mail()
+
+        self.assertFalse(self.received(invoice))
+
+    def test_other_mail_is_read_and_left_alone(self):
+        email = self.send(self.buyer, self.buyer)
+        self.customer._cron_read_mail()
+
+        self.assertTrue(email.delivery_ids.is_read)
+        self.assertFalse(self.env['game.customer.invoice'].search([('customer_id', '=', self.customer.id)]))
 
     def test_an_invoice_it_agrees_with_is_paid_when_it_said(self):
         order = self.place()
@@ -142,7 +218,7 @@ class TestCustomerInvoices(CustomerCase):
         self.place()
         invoice = self.invoice()
         self.read(invoice)
-        self.customer._cron_read_invoices()
+        self.read(invoice)
         self.env['game.customer']._receive_invoice(invoice)
 
         self.assertEqual(len(self.received(invoice)), 1)
@@ -167,7 +243,9 @@ class TestCustomerInvoices(CustomerCase):
         self.assertEqual(received.state, 'refused')
         self.assertRegex(received.reason, r"more than we pay")
         self.assertEqual(order.state, 'requested', "still waiting for an invoice it can pay")
-        self.assertTrue(self.messages(f"Re: {invoice.name}"))
+        [reply] = self.written(f"Re: {invoice.name}")
+        self.assertEqual(reply.in_reply_to, received.email_id.message_id, "it answers the invoice's email")
+        self.assertIn(reply.delivery_ids.address, (received.email_id.reply_to or received.email_id.email_from))
         self.world._settle(received.date_received + timedelta(days=30))
         self.assertEqual(self.earned(), 0)
 
@@ -193,13 +271,15 @@ class TestCustomerInvoices(CustomerCase):
 
     def test_an_invoice_to_a_customer_contact_reaches_the_customer(self):
         self.place()
-        contact = self.env['res.partner'].create({'name': "Accounts payable", 'parent_id': self.buyer.id})
+        contact = self.env['res.partner'].create({
+            'name': "Accounts payable", 'parent_id': self.buyer.id, 'email': 'ap@outside.example.com',
+        })
         invoice = self.invoice()
         invoice.button_draft()
         invoice.partner_id = contact
         invoice.action_post()
 
-        self.assertEqual(self.read(invoice).state, 'to_pay')
+        self.assertEqual(self.read(invoice, contact).state, 'to_pay')
 
     def test_a_customer_who_cannot_pay_says_so(self):
         order = self.place()
@@ -223,7 +303,9 @@ class TestCustomerInvoices(CustomerCase):
             'invoice_line_ids': [Command.create({'product_id': self.clip.id, 'quantity': 1, 'price_unit': 0.08})],
         })
         refund.action_post()
-        self.customer._cron_read_invoices()
+        self.send(draft)
+        self.send(refund)
+        self.customer._cron_read_mail()
 
         self.assertFalse(self.received(draft) | self.received(refund))
 

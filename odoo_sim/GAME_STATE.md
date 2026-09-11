@@ -192,8 +192,9 @@ In `models/game_customer.py`.
 `game.customer` is an automated buyer: a `partner_id`, the product it buys,
 how much per order (`qty`, in the product's unit), the most it pays per unit
 **taxes included** (`max_price`), how long after agreeing to an invoice it
-pays (`payment_delay`, game hours), and how long after receiving its goods it
-orders again (`interval`).
+pays (`payment_delay`, game hours), how long after receiving its goods it
+orders again (`interval`), and the address it has for the company
+(`write_to`).
 
 A customer has **one order open at a time**. The customer-order cron
 (triggered when a customer is created and at its `next_order_date`, hourly as
@@ -201,28 +202,33 @@ a safety net) has every customer with nothing open, whose time has come, place
 a `game.customer.order` -- a copy of its terms at that moment -- and write to
 the company about it.
 
-**Everything a customer says goes through `_write_to_company(subject, body)`**,
-the seam for the game's email. Until that lands, the message is posted on the
-customer's contact in Odoo, as an email from them, and the order shows on
-`/game`. Once it lands, that method sends an in-game email, and nothing else
-changes.
+**Everything a customer says is email** (`MAIL.md`), sent from its contact
+with `game.email._send_from` by `_write_to_company`. An order goes to
+`write_to`; the paperclip scenario points it at the administrator, who is
+given an address if they have none, so it lands in their inbox on `/game`. A
+reply goes where the email it answers asked (its Reply-To, else its sender),
+threaded under it, so a refusal files itself with the invoice's thread. A
+customer with nowhere to write still orders: a warning is logged, and `/game`
+shows the order.
 
 ### 7.2 Reading an invoice
 
-Posting a customer invoice (`account.move._post`) **only triggers the invoice
-cron**, as approving a purchase order triggers the vendor. Each customer reads
-the posted customer invoices addressed to its company (`commercial_partner_id`,
-so an invoice to a contact counts) that it has not read yet. `game.customer.
-_receive_invoice(move)` is the entry point: idempotent, a no-op for anything
-but a posted customer invoice to a world customer, and the hook an inbound
-email will call. Today "sent" means "posted"; once customers read email it
-will mean the email, and only the trigger moves.
+**A customer reads an invoice when it is emailed to it**, not when it is
+posted: posting is the player's bookkeeping, sending is telling the customer.
+The player sends it with *Send* on the invoice, or any email about it. The
+post office wakes the customer-mail cron whenever it delivers outside the
+company (`game.email.delivery._received`); each customer then reads its
+unread mail, at its own address or a contact's, once (`is_read`). An email
+that Odoo says is about (`res_model` / `res_id`) a posted customer invoice of
+that customer's company goes to `game.customer._receive_invoice(move, email)`,
+which is idempotent; anything else is read and left alone.
 
 Reading is a **snapshot**, `game.customer.invoice`: number, payment
 reference, total, currency, and the quantity of the product the customer buys,
-converted to the product's unit. `UNIQUE(invoice_id)`. The invoice is never
-read again: resetting it to draft and raising the price afterwards changes
-nothing.
+converted to the product's unit, and the email it came with. `UNIQUE(invoice_id)`.
+It is taken from the invoice as it stands when the email is read, within a
+cron tick of arriving, and never read again: resetting the invoice to draft
+and raising the price afterwards changes nothing.
 
 Then the customer decides. It refuses, and writes back to say why, when the
 invoice:
@@ -437,7 +443,7 @@ at install:
 | **Wire**, in m, Buy route; bought from *Tensile Wire Supply* in **Spool (50 m)** at 12.50, 1 day lead time | vendor ships wire only, arriving 24 game hours after it gets the order |
 | **Paperclip**, in Units, Manufacture route | recipe: **0.1 m wire, 2 game minutes** per paperclip |
 | BoM: 1 paperclip = 0.1 m wire; one operation, *Manufacture paperclip*, 2 min, on work center *Paperclip bench* | workstation *Paperclip bench*, linked to that work center |
-| **Binder & Co.**, a contact; Paperclip sells at 0.05 plus the default sales tax | customer: 200 paperclips an order, at most **0.08 each, taxes included**; pays 4 game hours after agreeing to an invoice; orders again a game day after delivery; **1000 in the bank** |
+| **Binder & Co.**, a contact; Paperclip sells at 0.05 plus the default sales tax; the administrator gets the address `you@paperclips.example.com` if they have none | customer: 200 paperclips an order, at most **0.08 each, taxes included**; emails its orders to the administrator; pays 4 game hours after agreeing to an invoice; orders again a game day after delivery; **1000 in the bank** |
 
 It enables work orders and units of measure for employees. It starts with no
 stock, and the company with no money: the customer's payments are the first. Everything the player may change is `noupdate`, so upgrading the module
@@ -465,9 +471,11 @@ invoice.
   0.01 of a unit would round to nothing, and make things for free.
 - **Money only comes in.** The company pays nobody yet: wire is shipped and
   never paid for. Vendor bills and outgoing payments are next (§14).
-- **A customer "receives" an invoice when it is posted**, not when it is sent,
-  until email lands (§7.2). Until then its order request is a message on its
-  contact in Odoo, easy to miss; `/game` shows the order too.
+- **A customer reads the invoice, not the email's PDF**, as the invoice stands
+  when the email is read (§7.2). Changing an invoice in the tick between
+  sending and reading changes what the customer reads.
+- **A customer only reads invoices.** Other mail is marked read and left
+  alone: it does not answer questions, quotations or reminders.
 - **Community cannot reconcile statement lines** (§8.3). The imported lines
   and the registered payments are two records of one fact, which the player
   cannot match in Odoo.
@@ -490,7 +498,8 @@ invoice.
 - Lots and serial numbers.
 - Paying out: vendor bills, and payments the player initiates in Odoo reaching
   the bank (a payment file the bank reads, as a real one would).
-- Wiring customers to the game's email (§7.1, §7.2).
+- Customers that answer the rest of their mail: questions, quotations,
+  reminders.
 - Customers who negotiate, cancel, pay late, order different things, or come
   and go.
 - Players creating recipes; employees pressing buttons.
@@ -518,7 +527,10 @@ unconnected accounts, the trigger). `test_customer.py`: asking and asking
 again, one order at a time, reading once, the snapshot of an invoice, every
 refusal, partial invoices, contacts, an empty account, drafts and credit
 notes, shipping (what was paid for, not before, not twice, not what is not
-there), the page's view, and shipping over HTTP. Three more premise tests:
+there), the page's view, and shipping over HTTP; and their mail (orders landing
+in the player's inbox, an invoice read only once emailed and only by its own
+customer, other mail left alone, a refusal answering the invoice's email).
+Three more premise tests:
 **registering a payment or typing a statement line in Odoo moves no money, and
 validating a delivery ships nothing.**
 
@@ -562,5 +574,5 @@ Checked by hand at `--rate 720`, through `game_run` and headless Chrome:
 | How does Odoo learn of a payment? | **A bank feed** importing statement lines, deduplicated by the bank's transaction identifier (§8.3). |
 | Does a customer pay whatever it is invoiced? | **No.** It pays on its terms: what it asked for, at its price or less, taxes included (§7.2). |
 | When do the goods leave? | **When the player ships, after payment** (§7.4). |
-| How does a customer learn of an invoice? | **A cron triggered on posting**, reading posted invoices, ready to be re-pointed at email (§7.2). |
+| How does a customer learn of an invoice? | **By email.** The player sends it, the post office delivers it, and the customer's mail cron reads it (§7.2). Posting alone tells the customer nothing. |
 | Does the company start with money? | **No**, unlike stock: the score starts from what the game gives (§8.4). |

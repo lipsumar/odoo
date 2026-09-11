@@ -133,4 +133,13 @@
 -->
 <function model="game.bank.account" name="_open" eval="[ref('partner_customer'), 1000.0]"/>
 
+<!--
+    Binder & Co. writes to the player, the administrator, who gets an address
+    if they have none: the customer's email lands in their inbox on /game, and
+    Odoo needs a sender's address to email an invoice.  Fills in blanks only,
+    so it too can sit outside noupdate.
+-->
+<function model="game.customer" name="_introduce"
+          eval="[ref('customer_binder'), ref('base.user_admin'), 'you@paperclips.example.com']"/>
+
 </odoo>

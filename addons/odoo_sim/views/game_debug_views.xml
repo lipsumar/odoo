@@ -116,6 +116,7 @@
             <field name="currency_id" column_invisible="1"/>
             <field name="payment_delay"/>
             <field name="interval"/>
+            <field name="write_to"/>
             <field name="next_order_date"/>
         </list>
     </field>

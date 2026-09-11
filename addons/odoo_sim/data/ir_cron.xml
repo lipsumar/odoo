@@ -4,7 +4,7 @@
 <!--
     Every cron here is driven by triggers: the settle cron at each run's end,
     each shipment's arrival and each payment's due time; the vendor agent
-    whenever an order is approved; the customers when an invoice is posted and
+    whenever an order is approved; the customers when mail reaches them and
     when they are due to order again; the bank feed at every transaction on a
     connected account; the post office whenever an email is posted (MAIL.md).
     The intervals are a safety net only, and are game hours like every cron
@@ -52,11 +52,11 @@
     <field name="interval_type">hours</field>
 </record>
 
-<record id="ir_cron_customer_invoices" model="ir.cron" forcecreate="True">
-    <field name="name">Game world: customers read their invoices</field>
+<record id="ir_cron_customer_mail" model="ir.cron" forcecreate="True">
+    <field name="name">Game world: customers read their mail</field>
     <field name="model_id" ref="model_game_customer"/>
     <field name="state">code</field>
-    <field name="code">model._cron_read_invoices()</field>
+    <field name="code">model._cron_read_mail()</field>
     <field name="user_id" ref="base.user_root"/>
     <field name="interval_number">1</field>
     <field name="interval_type">hours</field>

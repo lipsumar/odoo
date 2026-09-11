@@ -1,14 +1,16 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """Customers outside the company: they ask for goods, pay for them, and receive them.
 
-A customer is an agent, like a vendor.  It asks for goods by writing to the
-company, reads the invoices the company sends it, pays the ones it agrees with
+A customer is an agent, like a vendor.  It asks for goods by emailing the
+company, reads the invoices the company emails it, pays the ones it agrees with
 through the game bank, and has its goods once the player ships them in the
-world.  Confirming a sale order, posting an invoice, registering a payment and
+world.  Its mail is the world's (``odoo_sim/MAIL.md``): it writes through
+``game.email._send_from`` and reads what the post office delivers to it.  Confirming a sale order, posting an invoice, registering a payment and
 validating a delivery in Odoo are the player *recording* all of this; the world
 reads an invoice once, when the customer receives it, and never again.  See
 ``odoo_sim/GAME_STATE.md`` section 7.
 """
+import logging
 from datetime import timedelta
 
 from markupsafe import Markup
@@ -16,6 +18,8 @@ from markupsafe import Markup
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import SQL, float_compare, float_is_zero, format_amount
+
+_logger = logging.getLogger(__name__)
 
 #: A customer has one order open at a time: it asks again once it has its goods.
 OPEN_STATES = ('requested', 'invoiced', 'paid')
@@ -51,6 +55,10 @@ class GameCustomer(models.Model):
     interval = fields.Float(
         "Orders again after (game hours)", required=True, default=24.0,
         help="Game time between receiving its goods and asking for more.")
+    write_to = fields.Char(
+        "Writes to",
+        help="The address this customer has for the company: where it sends its orders. "
+             "Its replies go where the email they answer asked.")
     next_order_date = fields.Datetime(
         "Orders next", readonly=True,
         help="When it next asks for goods. Empty: the next time the customer agent runs.")
@@ -124,59 +132,98 @@ class GameCustomer(models.Model):
         self.env['game.world']._changed()
         return order
 
-    def _write_to_company(self, subject, body):
-        """ Send the company an email from this customer.
+    def _write_to_company(self, subject, body, parent=None):
+        """ Email the company, from this customer.  Everything a customer says goes through here.
 
-        **The seam for the game's email**, which is being built separately
-        (GitHub issue #4).  Everything a customer says goes through here.  Until
-        mail between the world and the company exists, it lands on the
-        customer's contact in Odoo, as a message from them.  When mail exists,
-        only this method changes.
+        A reply goes where the email it answers asked -- its Reply-To, else its
+        sender -- threaded under it, so that Odoo files it with the invoice it
+        answers.  Anything else goes to ``write_to``.
+
+        Nowhere to write is logged rather than raised: a customer that cannot
+        reach the company still orders and pays, and the page shows its order.
         """
         self.ensure_one()
-        self.partner_id.message_post(
-            body=body, subject=subject, author_id=self.partner_id.id,
-            message_type='email', subtype_xmlid='mail.mt_note',
-        )
+        to = (parent.reply_to or parent.email_from) if parent else self.write_to
+        if to:
+            try:
+                with self.env.cr.savepoint():
+                    return self.env['game.email']._send_from(self.partner_id, to, subject, body, parent=parent)
+            except UserError as error:
+                _logger.warning("%s could not write to %s: %s", self.partner_id.display_name, to, error)
+        else:
+            _logger.warning("%s has no address for the company, and did not send %r",
+                            self.partner_id.display_name, subject)
+        return self.env['game.email']
+
+    @api.model
+    def _introduce(self, customer_id, user_id, address):
+        """ Have ``customer_id`` write to ``user_id``, giving them ``address`` if they have none.
+
+        For scenario data, whose ``<function>`` runs on every install and
+        upgrade: it only fills in what is blank, so a player's own address and
+        a customer's own contact are never overwritten.
+        """
+        customer, user = self.browse(customer_id), self.env['res.users'].browse(user_id)
+        if not user.email:
+            user.email = address
+        if not customer.write_to:
+            customer.write_to = user.email
 
     # -- reading invoices ------------------------------------------------------
 
     @api.model
-    def _trigger_invoices(self):
-        cron = self.env.ref('odoo_sim.ir_cron_customer_invoices', raise_if_not_found=False)
+    def _trigger_mail(self):
+        cron = self.env.ref('odoo_sim.ir_cron_customer_mail', raise_if_not_found=False)
         if cron:
             cron._trigger()
 
-    @api.model
-    def _cron_read_invoices(self):
-        """ Every customer reads the invoices it has been sent and not read yet.
+    def _mailboxes(self):
+        """ ``{address: customer}``: the customer's own address, and its contacts'. """
+        return {
+            partner.email_normalized: customer
+            for customer in self
+            for partner in customer.partner_id | customer.partner_id.child_ids
+            if partner.email_normalized
+        }
 
-        Triggered when the player posts a customer invoice (``account.move._post``)
-        and not run inline there, so the customer stays an agent reacting to
-        what it has been sent.  Today "sent" means "posted in Odoo"; once
-        customers read email it will mean the email, and only this trigger
-        moves.
+    @api.model
+    def _cron_read_mail(self):
+        """ Every customer reads the mail that has reached it, and acts on the invoices.
+
+        Woken by the post office whenever it delivers outside the company
+        (``game.email.delivery._received``), rather than acting inside the
+        post office's run, so a customer stays an agent reading its mail.  An
+        email is read once: the post office's ``is_read`` says so.
         """
-        customers = self.search([])
-        if not customers:
+        mailboxes = self.search([])._mailboxes()
+        if not mailboxes:
             return
-        read = self.env['game.customer.invoice']._search([('invoice_id', '!=', False)])
-        invoices = self.env['account.move'].search([
-            ('move_type', '=', 'out_invoice'),
-            ('state', '=', 'posted'),
-            ('commercial_partner_id', 'in', customers.partner_id.ids),
-            ('id', 'not in', read.subselect('invoice_id')),
+        deliveries = self.env['game.email.delivery'].search([
+            ('route', '=', 'outside'),
+            ('state', '=', 'delivered'),
+            ('is_read', '=', False),
+            ('address', 'in', list(mailboxes)),
         ], order='id')
-        for invoice in invoices:
-            self._receive_invoice(invoice)
+        for delivery in deliveries:
+            mailboxes[delivery.address]._read_mail(delivery.email_id)
+            delivery.is_read = True
+
+    def _read_mail(self, email):
+        """ Read one email.  Only an invoice means anything to a customer, so far. """
+        self.ensure_one()
+        if email.res_model != 'account.move':
+            return
+        invoice = self.env['account.move'].browse(email.res_id).exists()
+        if invoice and invoice.commercial_partner_id == self.partner_id.commercial_partner_id:
+            self._receive_invoice(invoice, email)
 
     @api.model
-    def _receive_invoice(self, invoice):
+    def _receive_invoice(self, invoice, email=None):
         """ The customer ``invoice`` is addressed to reads it, and decides whether to pay.
 
-        **The seam for inbound email**: a customer that receives an invoice by
-        mail comes through here.  Idempotent, and does nothing for anything but
-        a posted customer invoice addressed to a customer in the world.
+        ``email`` is the one it came with, which a refusal answers.
+        Idempotent, and does nothing for anything but a posted customer
+        invoice addressed to a customer in the world.
         """
         received = self.env['game.customer.invoice']
         if invoice.move_type != 'out_invoice' or invoice.state != 'posted':
@@ -184,9 +231,9 @@ class GameCustomer(models.Model):
         customer = self.search([('partner_id', '=', invoice.commercial_partner_id.id)], limit=1)
         if not customer or received.search_count([('invoice_id', '=', invoice.id)], limit=1):
             return received
-        return customer._read(invoice)
+        return customer._read(invoice, email)
 
-    def _read(self, invoice):
+    def _read(self, invoice, email=None):
         """ Take in ``invoice`` as it reads now, and decide.
 
         **A snapshot**, as a shipment is of a purchase order: the amount, the
@@ -210,6 +257,7 @@ class GameCustomer(models.Model):
             'company_id': invoice.company_id.id,
             'name': invoice.name,
             'reference': invoice.payment_reference or invoice.name,
+            'email_id': email.id if email else False,
             'amount': invoice.amount_total,
             'currency_id': invoice.currency_id.id,
             'qty': qty,
@@ -221,6 +269,7 @@ class GameCustomer(models.Model):
             self._write_to_company(
                 self.env._("Re: %s", invoice.name),
                 Markup("<p>%s</p><p>%s</p>") % (reason, self.partner_id.display_name),
+                parent=email,
             )
         else:
             received = received.create(dict(
@@ -359,6 +408,9 @@ class GameCustomerInvoice(models.Model):
     date_received = fields.Datetime(required=True, readonly=True)
     date_due = fields.Datetime("Pays at", readonly=True, index=True)
     transaction_id = fields.Many2one('game.bank.transaction', "Payment", readonly=True, ondelete='restrict')
+    email_id = fields.Many2one(
+        'game.email', "Arrived with", readonly=True, ondelete='set null',
+        help="The email that brought it. A refusal answers it.")
 
     # A customer reads an invoice once, which is what makes reading idempotent.
     _invoice_uniq = models.Constraint(
@@ -392,6 +444,7 @@ class GameCustomerInvoice(models.Model):
                 customer._write_to_company(
                     self.env._("Re: %s", received.name),
                     Markup("<p>%s</p><p>%s</p>") % (reason, customer.partner_id.display_name),
+                    parent=received.email_id,
                 )
                 continue
             received.write({'state': 'paid', 'transaction_id': transaction.id})
@@ -403,12 +456,11 @@ class GameCustomerInvoice(models.Model):
             })
 
 
-class AccountMove(models.Model):
-    _inherit = 'account.move'
+class GameEmailDelivery(models.Model):
+    _inherit = 'game.email.delivery'
 
-    def _post(self, soft=True):
-        """ Let the customers know there may be invoices to read. """
-        posted = super()._post(soft=soft)
-        if any(move.move_type == 'out_invoice' for move in posted):
-            self.env['game.customer']._trigger_invoices()
-        return posted
+    def _received(self):
+        """ Mail has reached mailboxes outside the company: some may be customers'. """
+        super()._received()
+        if self:
+            self.env['game.customer']._trigger_mail()

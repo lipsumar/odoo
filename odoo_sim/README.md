@@ -222,14 +222,16 @@ Then, at `http://localhost:8069`:
    *Manufacture*. Each paperclip takes 10 cm of wire and two game minutes.
 4. **Record it.** Mark the manufacturing order done in Odoo, or don't. Odoo
    will believe whatever you tell it; the world won't.
-5. **A customer asks.** *Binder & Co.* wants 200 paperclips, at 0.08 each at
-   most, taxes included. Until the game has email, its message lands on its
-   contact in Odoo; `/game` shows the order under *Customer orders*.
-6. **Invoice it.** In Sales, quote 200 paperclips to Binder & Co., confirm,
-   create the invoice and post it. The customer reads it within a tick: if it
-   asks too much, or for the wrong thing, the order says why it was refused
-   (and so does a message on the contact). Otherwise it pays four game hours
-   later.
+5. **A customer asks.** *Binder & Co.* emails you for 200 paperclips, at
+   0.08 each at most, taxes included. It lands in your inbox under *Mail* on
+   `/game`: the scenario gives the administrator the address
+   `you@paperclips.example.com` if they had none. `/game` also shows the order
+   under *Customer orders*.
+6. **Invoice it, and send it.** In Sales, quote 200 paperclips to Binder &
+   Co., confirm, create the invoice, post it, and press *Send*: the customer
+   only reads invoices it is emailed. If it asks too much, or for the wrong
+   thing, it replies saying why, on the invoice's thread, and the order shows
+   it. Otherwise it pays four game hours later.
 7. **Get paid.** The payment lands in the company's account at the game bank,
    the balance at the top of `/game`, which is the score. The bank feed
    imports it into your Bank journal as a statement line, within a tick.
