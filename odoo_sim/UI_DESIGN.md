@@ -340,7 +340,11 @@ dependencies. `world.js` takes its `WebSocket` and `fetch` as arguments, and
 `view.js` splits the decision (`describe`, pure) from the DOM writes, so the
 tests drive both by hand.
 
-### 5.5 Game state, when it comes — not milestone 1
+### 5.5 Game state — built, see `GAME_STATE.md`
+
+Built as described here, for manufacturing and purchasing: `GAME_STATE.md`
+has the models, the endpoints (`/game/api/world` and the actions), and why the
+bus carries only a content-free notice that the world changed.
 
 Declare game state as ordinary Odoo models — `game.player`, `game.plot` — which
 gives tables `game_player`, `game_plot` in the same database as Odoo's own, so
