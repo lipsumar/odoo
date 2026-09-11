@@ -1,0 +1,10 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_game_stock_debug,game.stock debug,model_game_stock,base.group_system,1,0,0,0
+access_game_stock_entry_debug,game.stock.entry debug,model_game_stock_entry,base.group_system,1,0,0,0
+access_game_recipe_debug,game.recipe debug,model_game_recipe,base.group_system,1,0,0,0
+access_game_recipe_line_debug,game.recipe.line debug,model_game_recipe_line,base.group_system,1,0,0,0
+access_game_workstation_debug,game.workstation debug,model_game_workstation,base.group_system,1,0,0,0
+access_game_production_debug,game.production debug,model_game_production,base.group_system,1,0,0,0
+access_game_vendor_debug,game.vendor debug,model_game_vendor,base.group_system,1,0,0,0
+access_game_shipment_debug,game.shipment debug,model_game_shipment,base.group_system,1,0,0,0
+access_game_shipment_line_debug,game.shipment.line debug,model_game_shipment_line,base.group_system,1,0,0,0

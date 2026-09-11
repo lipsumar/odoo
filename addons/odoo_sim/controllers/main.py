@@ -18,6 +18,8 @@ import werkzeug.exceptions
 from odoo import game_clock, http
 from odoo.addons.bus.websocket import WebsocketConnectionHandler
 from odoo.addons.odoo_sim import pulse
+from odoo.addons.odoo_sim.controllers.world import _world
+from odoo.addons.odoo_sim.models.game_world import CHANGED
 from odoo.http import request
 from odoo.tools import file_open
 
@@ -112,6 +114,9 @@ class GameUi(http.Controller):
         closes a browser's socket on sight unless its ``version`` parameter
         names the bus's own worker (``WebsocketConnectionHandler._VERSION``),
         and that value changes whenever the bus's client does.
+
+        So does the world: its first state, and the type of the notice that
+        says it changed (GAME_STATE.md 8).
         """
         scripts, styles = _built_assets()
         return request.render('odoo_sim.index', {
@@ -119,6 +124,8 @@ class GameUi(http.Controller):
                 'clock': pulse.payload(_world_clock()),
                 'channel': pulse.CHANNEL,
                 'type': pulse.TYPE,
+                'changed_type': CHANGED,
+                'world': _world()._snapshot(),
                 'websocket_version': WebsocketConnectionHandler._VERSION,
             },
             'scripts': scripts,

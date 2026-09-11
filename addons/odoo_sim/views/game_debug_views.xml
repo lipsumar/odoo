@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+<!--
+    A window onto the world for whoever is developing the game: Settings >
+    Technical > Game World, in debug mode, for administrators, read-only.
+    Nobody has write access to these models; the game writes them through
+    sudo() from its own endpoints and crons (GAME_STATE.md 9).
+-->
+
+<record id="game_stock_view_list" model="ir.ui.view">
+    <field name="model">game.stock</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="product_id"/>
+            <field name="qty"/>
+            <field name="uom_id"/>
+            <field name="write_date" string="Last change (game)"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_stock_entry_view_list" model="ir.ui.view">
+    <field name="model">game.stock.entry</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date"/>
+            <field name="kind"/>
+            <field name="product_id"/>
+            <field name="qty"/>
+            <field name="uom_id"/>
+            <field name="production_id"/>
+            <field name="shipment_id"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_production_view_list" model="ir.ui.view">
+    <field name="model">game.production</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="workstation_id"/>
+            <field name="product_id"/>
+            <field name="qty"/>
+            <field name="state"/>
+            <field name="date_start"/>
+            <field name="date_end"/>
+            <field name="production_id"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_shipment_view_list" model="ir.ui.view">
+    <field name="model">game.shipment</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="vendor_id"/>
+            <field name="purchase_id"/>
+            <field name="state"/>
+            <field name="date_shipped"/>
+            <field name="date_arrival"/>
+            <field name="date_accepted"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_recipe_view_list" model="ir.ui.view">
+    <field name="model">game.recipe</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="product_id"/>
+            <field name="duration"/>
+            <field name="line_ids" widget="many2many_tags"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_stock_action" model="ir.actions.act_window">
+    <field name="name">On hand</field>
+    <field name="res_model">game.stock</field>
+</record>
+<record id="game_stock_entry_action" model="ir.actions.act_window">
+    <field name="name">Ledger</field>
+    <field name="res_model">game.stock.entry</field>
+</record>
+<record id="game_production_action" model="ir.actions.act_window">
+    <field name="name">Production runs</field>
+    <field name="res_model">game.production</field>
+</record>
+<record id="game_shipment_action" model="ir.actions.act_window">
+    <field name="name">Shipments</field>
+    <field name="res_model">game.shipment</field>
+</record>
+<record id="game_recipe_action" model="ir.actions.act_window">
+    <field name="name">Recipes</field>
+    <field name="res_model">game.recipe</field>
+</record>
+<record id="game_workstation_action" model="ir.actions.act_window">
+    <field name="name">Workstations</field>
+    <field name="res_model">game.workstation</field>
+</record>
+<record id="game_vendor_action" model="ir.actions.act_window">
+    <field name="name">Vendors</field>
+    <field name="res_model">game.vendor</field>
+</record>
+
+<menuitem id="menu_game_world" name="Game World" parent="base.menu_custom" sequence="200">
+    <menuitem id="menu_game_stock" action="game_stock_action" sequence="10"/>
+    <menuitem id="menu_game_stock_entry" action="game_stock_entry_action" sequence="20"/>
+    <menuitem id="menu_game_production" action="game_production_action" sequence="30"/>
+    <menuitem id="menu_game_shipment" action="game_shipment_action" sequence="40"/>
+    <menuitem id="menu_game_recipe" action="game_recipe_action" sequence="50"/>
+    <menuitem id="menu_game_workstation" action="game_workstation_action" sequence="60"/>
+    <menuitem id="menu_game_vendor" action="game_vendor_action" sequence="70"/>
+</menuitem>
+
+</odoo>
