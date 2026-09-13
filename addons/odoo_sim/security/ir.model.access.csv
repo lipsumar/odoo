@@ -13,5 +13,7 @@ access_game_bank_transaction_debug,game.bank.transaction debug,model_game_bank_t
 access_game_customer_debug,game.customer debug,model_game_customer,base.group_system,1,0,0,0
 access_game_customer_order_debug,game.customer.order debug,model_game_customer_order,base.group_system,1,0,0,0
 access_game_customer_invoice_debug,game.customer.invoice debug,model_game_customer_invoice,base.group_system,1,0,0,0
+access_game_package_debug,game.package debug,model_game_package,base.group_system,1,0,0,0
+access_game_package_line_debug,game.package.line debug,model_game_package_line,base.group_system,1,0,0,0
 access_game_email_debug,game.email debug,model_game_email,base.group_system,1,0,0,0
 access_game_email_delivery_debug,game.email.delivery debug,model_game_email_delivery,base.group_system,1,0,0,0

@@ -3,9 +3,11 @@
 
 A customer is an agent, like a vendor.  It asks for goods by emailing the
 company, reads the invoices the company emails it, pays the ones it agrees with
-through the game bank, and has its goods once the player ships them in the
-world.  Its mail is the world's (``odoo_sim/MAIL.md``): it writes through
-``game.email._send_from`` and reads what the post office delivers to it.  Confirming a sale order, posting an invoice, registering a payment and
+through the game bank, has its goods when the post brings a package to its
+address (``game_post.py``), and writes to complain when they are slow to come.
+Its mail is the world's (``odoo_sim/MAIL.md``): it writes through
+``game.email._send_from`` and reads what the post office delivers to it.
+Confirming a sale order, posting an invoice, registering a payment and
 validating a delivery in Odoo are the player *recording* all of this; the world
 reads an invoice once, when the customer receives it, and never again.  See
 ``odoo_sim/GAME_STATE.md`` section 7.
@@ -17,7 +19,7 @@ from markupsafe import Markup
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import SQL, float_compare, float_is_zero, format_amount
+from odoo.tools import SQL, email_normalize, float_compare, float_is_zero, format_amount
 
 _logger = logging.getLogger(__name__)
 
@@ -59,6 +61,14 @@ class GameCustomer(models.Model):
         "Writes to",
         help="The address this customer has for the company: where it sends its orders. "
              "Its replies go where the email they answer asked.")
+    address = fields.Text(
+        "Postal address",
+        help="Where the post brings its goods, and what it tells the company when it orders. "
+             "The world's own: the contact's address in Odoo is the player's copy of it.")
+    complain_after = fields.Float(
+        "Complains after (game hours)", required=True, default=72.0,
+        help="How long after paying, and after each complaint, it waits for its goods "
+             "before writing to ask where they are.")
     next_order_date = fields.Datetime(
         "Orders next", readonly=True,
         help="When it next asks for goods. Empty: the next time the customer agent runs.")
@@ -70,6 +80,9 @@ class GameCustomer(models.Model):
     )
     _qty_positive = models.Constraint('CHECK(qty > 0)', "A customer orders a positive quantity.")
     _max_price_positive = models.Constraint('CHECK(max_price >= 0)', "A price is not negative.")
+    # Zero would have it complain again at the very instant it complained.
+    _complain_after_positive = models.Constraint(
+        'CHECK(complain_after > 0)', "A customer waits a while before complaining.")
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -115,9 +128,9 @@ class GameCustomer(models.Model):
             'date_requested': fields.Datetime.now(),
         })
         product, uom = self.product_id.display_name, self.product_id.uom_id.name
-        self._write_to_company(
+        order.email_id = self._write_to_company(
             self.env._("Order: %(qty)s %(product)s", qty=_qty(self.qty), product=product),
-            Markup("<p>%s</p><p>%s</p><p>%s</p>") % (
+            Markup("<p>%s</p><p>%s</p>%s<p>%s</p>") % (
                 self.env._("Hello,"),
                 self.env._(
                     "We would like %(qty)s %(uom)s of %(product)s, and can pay up to %(price)s per "
@@ -126,24 +139,41 @@ class GameCustomer(models.Model):
                     qty=_qty(self.qty), uom=uom, product=product,
                     price=format_amount(self.env, self.max_price, self.currency_id),
                 ),
+                self._ship_to(),
                 self.partner_id.display_name,
             ),
         )
         self.env['game.world']._changed()
         return order
 
+    def _ship_to(self):
+        """ The paragraph of an email saying where to send the goods; empty without an address. """
+        self.ensure_one()
+        if not self.address:
+            return Markup()
+        return Markup("<p>%s<br/>%s</p>") % (
+            self.env._("Please send them by post to:"),
+            Markup("<br/>").join(self.address.splitlines()),
+        )
+
     def _write_to_company(self, subject, body, parent=None):
         """ Email the company, from this customer.  Everything a customer says goes through here.
 
         A reply goes where the email it answers asked -- its Reply-To, else its
         sender -- threaded under it, so that Odoo files it with the invoice it
-        answers.  Anything else goes to ``write_to``.
+        answers.  A follow-up to one of its own emails goes where that one
+        went, threaded under it too.  Anything else goes to ``write_to``.
 
         Nowhere to write is logged rather than raised: a customer that cannot
         reach the company still orders and pays, and the page shows its order.
         """
         self.ensure_one()
-        to = (parent.reply_to or parent.email_from) if parent else self.write_to
+        if parent and email_normalize(parent.email_from or '') in self._mailboxes():
+            to = parent.email_to
+        elif parent:
+            to = parent.reply_to or parent.email_from
+        else:
+            to = self.write_to
         if to:
             try:
                 with self.env.cr.savepoint():
@@ -168,6 +198,34 @@ class GameCustomer(models.Model):
             user.email = address
         if not customer.write_to:
             customer.write_to = user.email
+
+    @api.model
+    def _give_address(self, customer_id, address):
+        """ Give ``customer_id`` the postal ``address`` if it has none: for scenario data, as ``_introduce``. """
+        customer = self.browse(customer_id)
+        if not customer.address:
+            customer.address = address
+
+    # -- receiving goods -------------------------------------------------------
+
+    def _receive_package(self, package):
+        """ The post has brought ``package`` here: this customer keeps everything in it.
+
+        What it buys counts toward its open order, paid for or not -- shipping
+        before the payment is in is the company's risk to take -- and the order
+        is done once the customer has both paid and received what it paid for
+        (``_complete``).  Anything else in the box, or goods arriving with no
+        order open, it simply keeps.
+        """
+        self.ensure_one()
+        digits = self.env['decimal.precision'].precision_get('Product Unit')
+        qty = sum(package.line_ids.filtered(lambda line: line.product_id == self.product_id).mapped('qty'))
+        order = self.order_ids.filtered(lambda o: o.state in OPEN_STATES)[:1]
+        if order and not float_is_zero(qty, precision_digits=digits):
+            package.order_id = order
+            order.qty_received += qty
+            order._complete(package.date_arrival)
+        self.env['game.world']._changed()
 
     # -- reading invoices ------------------------------------------------------
 
@@ -326,16 +384,28 @@ class GameCustomerOrder(models.Model):
         ('requested', "Waiting for an invoice"),
         ('invoiced', "Invoice accepted"),
         ('paid', "Paid"),
-        ('delivered', "Delivered"),
+        ('delivered', "Received"),
     ], required=True, readonly=True, default='requested', index=True)
     qty_paid = fields.Float(
         "Quantity paid for", digits='Product Unit', readonly=True,
         help="What the customer paid for, and so what it expects to receive.")
     amount_paid = fields.Monetary(readonly=True)
+    qty_received = fields.Float(
+        "Quantity received", digits='Product Unit', readonly=True,
+        help="What the post brought the customer while this order was open.")
     date_requested = fields.Datetime(required=True, readonly=True)
     date_paid = fields.Datetime(readonly=True)
-    date_delivered = fields.Datetime(readonly=True)
+    date_delivered = fields.Datetime("Date received", readonly=True)
+    date_chase = fields.Datetime(
+        "Complains at", readonly=True, index=True,
+        help="When the customer, paid up and still without its goods, next writes to ask for them.")
+    complaint_count = fields.Integer("Complaints", readonly=True)
+    email_id = fields.Many2one(
+        'game.email', "Asked in", readonly=True, ondelete='set null',
+        help="The email the customer ordered with. Its complaints follow it up.")
     invoice_ids = fields.One2many('game.customer.invoice', 'order_id', "Invoices received")
+    package_ids = fields.One2many('game.package', 'order_id', "Packages received")
+    # Shipped straight to the customer, before goods went by post (1.2).
     entry_ids = fields.One2many('game.stock.entry', 'customer_order_id', "Ledger")
 
     def _compute_display_name(self):
@@ -345,33 +415,62 @@ class GameCustomerOrder(models.Model):
                 customer=order.partner_id.display_name, qty=_qty(order.qty), product=order.product_id.display_name,
             )
 
-    def _deliver(self):
-        """ Ship the order: the goods leave the world, and the customer has them.
+    def _complete(self, at):
+        """ Close each order whose customer has paid and has what it paid for, as of ``at``.
 
-        Only once the customer has paid -- its terms, and the company's: an
-        order that has not been paid for has nothing to ship yet.  Validating
-        the delivery order in Odoo is recording this, and changes nothing here.
+        Called when a payment goes through and when a package arrives, since
+        either can come first.  The customer orders again ``interval`` later.
         """
-        self.ensure_one()
-        # A payment may have come due since the last settle.
-        self.env['game.world']._settle()
-        self.env.cr.execute(SQL("SELECT id FROM game_customer_order WHERE id = %s FOR UPDATE", self.id))
-        self.invalidate_recordset(['state'])
-        if self.state == 'delivered':
-            raise UserError(self.env._("%s has already been delivered.", self.display_name))
-        if self.state != 'paid':
-            raise UserError(self.env._(
-                "%(customer)s has not paid for %(order)s yet.",
-                customer=self.partner_id.display_name, order=self.display_name,
-            ))
+        digits = self.env['decimal.precision'].precision_get('Product Unit')
+        for order in self:
+            if order.state != 'paid' or float_compare(
+                order.qty_received, order.qty_paid, precision_digits=digits,
+            ) < 0:
+                continue
+            order.write({'state': 'delivered', 'date_delivered': at, 'date_chase': False})
+            customer = order.customer_id
+            customer.next_order_date = at + timedelta(hours=customer.interval)
+            customer._trigger_orders(customer.next_order_date)
 
-        now = fields.Datetime.now()
-        self.env['game.stock']._apply(self.product_id, -self.qty_paid, 'delivered', date=now, customer_order=self)
-        self.write({'state': 'delivered', 'date_delivered': now})
-        customer = self.customer_id
-        customer.next_order_date = now + timedelta(hours=customer.interval)
-        customer._trigger_orders(customer.next_order_date)
-        self.env['game.world']._changed()
+    def _complain(self):
+        """ Paid, and still without its goods: the customer writes to ask for them, and waits again.
+
+        Due at ``date_chase`` (settled by ``game.world._settle``), and again
+        every ``complain_after`` until the goods come.  A follow-up to the email
+        it ordered with, so it lands on that thread.
+        """
+        digits = self.env['decimal.precision'].precision_get('Product Unit')
+        for order in self:
+            customer = order.customer_id
+            paid = order.invoice_ids.filtered(lambda received: received.state == 'paid')[:1]
+            values = {
+                'amount': format_amount(self.env, order.amount_paid, order.currency_id),
+                'qty': _qty(order.qty_paid),
+                'product': order.product_id.display_name,
+                'reference': paid.reference or paid.name or '',
+            }
+            if float_is_zero(order.qty_received, precision_digits=digits):
+                text = self.env._(
+                    "We paid %(amount)s for %(qty)s %(product)s (%(reference)s), and have not received them.",
+                    **values)
+            else:
+                text = self.env._(
+                    "We paid %(amount)s for %(qty)s %(product)s (%(reference)s), and have received only %(received)s.",
+                    received=_qty(order.qty_received), **values)
+            customer._write_to_company(
+                self.env._("Where are our %(qty)s %(product)s?", qty=values['qty'], product=values['product']),
+                Markup("<p>%s</p><p>%s</p>%s<p>%s</p>") % (
+                    self.env._("Hello,"), text, customer._ship_to(), customer.partner_id.display_name,
+                ),
+                parent=order.email_id,
+            )
+            order.write({
+                'complaint_count': order.complaint_count + 1,
+                'date_chase': order.date_chase + timedelta(hours=customer.complain_after),
+            })
+            self.env['game.world']._schedule_settle(order.date_chase)
+        if self:
+            self.env['game.world']._changed()
 
 
 class GameCustomerInvoice(models.Model):
@@ -448,12 +547,18 @@ class GameCustomerInvoice(models.Model):
                 )
                 continue
             received.write({'state': 'paid', 'transaction_id': transaction.id})
-            received.order_id.write({
+            order = received.order_id
+            order.write({
                 'state': 'paid',
                 'qty_paid': received.qty,
                 'amount_paid': received.amount,
                 'date_paid': received.date_due,
+                'date_chase': received.date_due + timedelta(hours=customer.complain_after),
             })
+            # The goods may have come before the money went.
+            order._complete(received.date_due)
+            if order.state == 'paid':
+                self.env['game.world']._schedule_settle(order.date_chase)
 
 
 class GameEmailDelivery(models.Model):

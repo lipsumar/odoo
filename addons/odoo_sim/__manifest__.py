@@ -1,6 +1,6 @@
 {
     'name': "Odoo Sim",
-    'version': '1.2',
+    'version': '1.3',
     'category': 'Hidden',
     'summary': "Game world runtime: the loop that drives an accelerated Odoo, and the world it drives",
     'description': """

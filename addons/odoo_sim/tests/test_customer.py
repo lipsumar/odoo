@@ -1,5 +1,8 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-"""Tests for customers: asking, invoices, payment and delivery (GAME_STATE.md 7).
+"""Tests for customers: asking, invoices and payment (GAME_STATE.md 7).
+
+How their goods reach them, by post, and what they say when they do not, is
+``test_post``.
 
 The test clip is sold without taxes, so an invoice's total is what the tests
 say it is.  Time is never frozen (see test_world): settling is always given an
@@ -11,14 +14,12 @@ holds every ``mail.mail`` back, so ``sending()`` lets Odoo send -- into the
 world's post, with a tripwire on SMTP, as in test_mail.
 """
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import patch
 
-from odoo import Command, game_clock
+from odoo import Command
 from odoo.addons.base.models.ir_mail_server import IrMail_Server
-from odoo.game_clock import GameClock
-from odoo.tests import new_test_user, tagged
-from odoo.tests.common import HttpCase
+from odoo.tests import new_test_user
 
 from odoo.addons.odoo_sim.tests.test_bank import BankCase
 
@@ -31,6 +32,7 @@ class CustomerCase(BankCase):
         cls.clip.taxes_id = False
         cls.buyer.email = 'buyer@outside.example.com'
         cls.seller = new_test_user(cls.env, 'seller', groups='base.group_user', email='seller@company.example.com')
+        cls.address = "Test buyer\n1 Test Street\n1000 Testville"
         cls.customer = cls.env['game.customer'].create({
             'partner_id': cls.buyer.id,
             'product_id': cls.clip.id,
@@ -38,7 +40,9 @@ class CustomerCase(BankCase):
             'max_price': 0.10,
             'payment_delay': 4,
             'interval': 24,
+            'complain_after': 72,
             'write_to': cls.seller.email,
+            'address': cls.address,
         })
         cls.accounts._deposit(cls.buyer.id, 50)
         cls.Email = cls.env['game.email']
@@ -99,6 +103,13 @@ class CustomerCase(BankCase):
         self.world._settle(received.date_due)
         return order
 
+    def post(self, qty, address=None, product=None):
+        """ Pack ``qty`` of the clip (or ``product``) in a new package, and send it to the buyer (or ``address``). """
+        package = self.env['game.package']._new()
+        package._pack(product or self.clip, qty)
+        package._send(self.address if address is None else address)
+        return package
+
 
 class TestCustomerOrders(CustomerCase):
 
@@ -109,6 +120,8 @@ class TestCustomerOrders(CustomerCase):
                          ('requested', self.clip, 100, 0.10))
         [email] = self.written("Order: 100 Test clip")
         self.assertEqual(email.delivery_ids.address, self.seller.email)
+        self.assertEqual(order.email_id, email)
+        self.assertIn("1 Test Street<br>1000 Testville", email._content()['body'], "where to send the goods")
 
     def test_an_order_lands_in_the_players_inbox(self):
         self.place()
@@ -134,11 +147,13 @@ class TestCustomerOrders(CustomerCase):
     def test_a_customer_asks_again_a_while_after_it_has_its_goods(self):
         self.give(self.clip, 100)
         order = self.paid_order()
-        order._deliver()
+        package = self.post(100)
+        self.world._settle(package.date_arrival)
         self.customer._cron_place_orders()
         self.assertEqual(len(self.customer.order_ids), 1, "not yet")
 
-        self.assertEqual(self.customer.next_order_date, order.date_delivered + timedelta(hours=24))
+        self.assertEqual(order.date_delivered, package.date_arrival)
+        self.assertEqual(self.customer.next_order_date, package.date_arrival + timedelta(hours=24))
         cron = self.env.ref('odoo_sim.ir_cron_customer_orders')
         triggers = self.env['ir.cron.trigger'].search([('cron_id', '=', cron.id)])
         self.assertIn(self.customer.next_order_date, triggers.mapped('call_at'))
@@ -310,74 +325,6 @@ class TestCustomerInvoices(CustomerCase):
         self.assertFalse(self.received(draft) | self.received(refund))
 
 
-class TestCustomerDelivery(CustomerCase):
-
-    def test_shipping_takes_the_goods_out_of_the_world(self):
-        self.give(self.clip, 120)
-        order = self.paid_order()
-        order._deliver()
-
-        self.assertEqual(order.state, 'delivered')
-        self.assertEqual(self.on_hand(self.clip), 20)
-        self.assertEqual((order.entry_ids.kind, order.entry_ids.qty), ('delivered', -100))
-
-    def test_what_ships_is_what_was_paid_for(self):
-        self.give(self.clip, 100)
-        order = self.paid_order(qty=60)
-        order._deliver()
-
-        self.assertEqual(self.on_hand(self.clip), 40)
-
-    def test_nothing_ships_before_it_is_paid_for(self):
-        self.give(self.clip, 100)
-        order = self.place()
-        with self.refused("has not paid"):
-            order._deliver()
-
-        received = self.read(self.invoice())
-        with self.refused("has not paid"):
-            order._deliver()
-
-        # Shipping settles first: a payment that has come due counts.
-        received.date_due = received.date_received - timedelta(minutes=1)
-        order._deliver()
-        self.assertEqual(order.state, 'delivered')
-
-    def test_what_does_not_exist_cannot_be_shipped(self):
-        self.give(self.clip, 99)
-        order = self.paid_order()
-        with self.refused("not enough Test clip"):
-            order._deliver()
-
-        self.assertEqual(order.state, 'paid')
-        self.assertEqual(self.on_hand(self.clip), 99)
-
-    def test_an_order_ships_once(self):
-        self.give(self.clip, 200)
-        order = self.paid_order()
-        order._deliver()
-        with self.refused("already been delivered"):
-            order._deliver()
-
-        self.assertEqual(self.on_hand(self.clip), 100)
-
-    def test_validating_a_delivery_in_odoo_ships_nothing(self):
-        """ Odoo can say the clips went out. They are still on the shelf. """
-        self.give(self.clip, 100)
-        self.env['stock.quant']._update_available_quantity(
-            self.clip, self.env['stock.warehouse'].search([], limit=1).lot_stock_id, 100)
-        sale = self.env['sale.order'].create({
-            'partner_id': self.buyer.id,
-            'order_line': [Command.create({'product_id': self.clip.id, 'product_uom_qty': 100})],
-        })
-        sale.action_confirm()
-        sale.picking_ids.move_ids.picked = True
-        sale.picking_ids.button_validate()
-
-        self.assertEqual(sale.picking_ids.state, 'done', "Odoo believes it")
-        self.assertEqual(self.on_hand(self.clip), 100, "the world does not")
-
-
 class TestCustomerSnapshot(CustomerCase):
 
     def test_the_snapshot_shows_the_bank_and_what_customers_want(self):
@@ -408,45 +355,3 @@ class TestCustomerSnapshot(CustomerCase):
             [(t['amount'], t['counterparty'], t['reference']) for t in bank['transactions'][:2]],
             [(-4, "Test buyer", "out"), (10, "Test buyer", "in")],
         )
-
-    def test_delivered_orders_leave_the_snapshot(self):
-        self.give(self.clip, 100)
-        order = self.paid_order()
-        order._deliver()
-
-        self.assertNotIn(order.id, [o['id'] for o in self.world._snapshot()['customer_orders']])
-
-
-@tagged('-at_install', 'post_install')
-class TestCustomerApi(CustomerCase, HttpCase):
-    """Shipping over real HTTP, with the clock pinned as in test_world's TestWorldApi."""
-
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(game_clock.invalidate, self.env.cr.dbname)
-        now = datetime.now()
-        game_clock.override(self.env.cr.dbname, GameClock(now, now, 1.0, False, timedelta(hours=1)))
-        self.authenticate('admin', 'admin')
-
-    def deliver(self, order_id):
-        return self.url_open(f'/game/api/customer_orders/{order_id}/deliver', json={}, method='POST')
-
-    def test_shipping_a_paid_order(self):
-        self.give(self.clip, 100)
-        order = self.paid_order()
-        response = self.deliver(order.id)
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertNotIn(order.id, [o['id'] for o in response.json()['customer_orders']])
-        self.assertEqual(self.on_hand(self.clip), 0)
-
-    def test_shipping_an_unpaid_order_is_refused(self):
-        self.give(self.clip, 100)
-        response = self.deliver(self.place().id)
-
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("has not paid", response.json()['message'])
-        self.assertEqual(self.on_hand(self.clip), 100)
-
-    def test_an_unknown_order_is_not_found(self):
-        self.assertEqual(self.deliver(999999).status_code, 404)

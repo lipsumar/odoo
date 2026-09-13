@@ -45,9 +45,18 @@ const renderWorld = createWorldView(worldRoot, {
         `shipment:${shipmentId}`,
         () => send('POST', `/game/api/shipments/${shipmentId}/accept`, {}),
     ),
-    ship: (orderId) => perform(
-        `order:${orderId}`,
-        () => send('POST', `/game/api/customer_orders/${orderId}/deliver`, {}),
+    newPackage: () => perform('package:new', () => send('POST', '/game/api/packages', {})),
+    pack: (packageId, { productId, qty }) => perform(
+        `package:${packageId}`,
+        () => send('POST', `/game/api/packages/${packageId}/pack`, { product_id: productId, qty }),
+    ),
+    unpack: (packageId) => perform(
+        `package:${packageId}`,
+        () => send('POST', `/game/api/packages/${packageId}/unpack`, {}),
+    ),
+    post: (packageId, address) => perform(
+        `package:${packageId}`,
+        () => send('POST', `/game/api/packages/${packageId}/send`, { address }),
     ),
 });
 

@@ -237,13 +237,23 @@ Then, at `http://localhost:8069`:
    imports it into your Bank journal as a statement line, within a tick.
    Record it with *Register Payment* on the invoice: community Odoo cannot
    match a statement line to an invoice.
-8. **Ship.** Once paid, press *Ship* on `/game`: the paperclips leave the
-   world. Validating the delivery order in Odoo is how you record that.
+8. **Post the paperclips.** Under *Post* on `/game`, press *New package*, put
+   200 paperclips in it, and write Binder & Co.'s address on it: the one in its
+   order email. Copy it rather than retype it, because the post reads every
+   word. Press *Send*. The post takes a game day. A box addressed to nobody
+   comes back to the bench a game day after that, still full, for you to
+   correct the address or unpack it. Nobody stops you sending before the money
+   is in; the customer keeps what arrives either way. Validating the delivery
+   order in Odoo is how you record it.
+9. **Don't keep it waiting.** If Binder & Co. has paid and its paperclips have
+   not come three game days later, it writes to ask where they are, on its
+   order's thread, and keeps writing until they do.
 
 To see what the world holds, rather than what Odoo says it holds, turn on
 debug mode and open *Settings → Technical → Game World*: the balance, the
 ledger of every real event, the runs, the shipments, the bank's accounts and
-transactions, and the customers' orders, all read-only.
+transactions, the customers' orders, and where every package really is, all
+read-only.
 
 ---
 

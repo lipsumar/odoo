@@ -75,10 +75,39 @@ class GameWorld(http.Controller):
         _existing(world, 'game.shipment', shipment_id)._accept()
         return world._snapshot(request.env.user)
 
-    @http.route('/game/api/customer_orders/<int:order_id>/deliver',
-                type='json2', auth='user', methods=['POST'])
-    def deliver(self, order_id):
-        """ Ship a paid order: its goods leave the world, for the customer. """
+    @http.route('/game/api/packages', type='json2', auth='user', methods=['POST'])
+    def new_package(self):
+        """ Take an empty box to the bench. """
         world = _acting()
-        _existing(world, 'game.customer.order', order_id)._deliver()
+        world.env['game.package']._new()
+        return world._snapshot(request.env.user)
+
+    @http.route('/game/api/packages/<int:package_id>/pack', type='json2', auth='user', methods=['POST'])
+    def pack(self, package_id, product_id=None, qty=None):
+        """ Put ``qty`` of a product, in its own unit, in the box: it leaves the shelves. """
+        world = _acting()
+        package = _existing(world, 'game.package', package_id)
+        if isinstance(product_id, bool) or not isinstance(product_id, int):
+            raise UserError(world.env._("What goes in the package?"))
+        product = _existing(world, 'product.product', product_id)
+        if isinstance(qty, bool) or not isinstance(qty, (int, float)) or qty <= 0:
+            raise UserError(world.env._("Put a positive quantity in the package."))
+        package._pack(product, qty)
+        return world._snapshot(request.env.user)
+
+    @http.route('/game/api/packages/<int:package_id>/unpack', type='json2', auth='user', methods=['POST'])
+    def unpack(self, package_id):
+        """ Put what is in the box back on the shelves. """
+        world = _acting()
+        _existing(world, 'game.package', package_id)._unpack()
+        return world._snapshot(request.env.user)
+
+    @http.route('/game/api/packages/<int:package_id>/send', type='json2', auth='user', methods=['POST'])
+    def send_package(self, package_id, address=''):
+        """ Write ``address`` on the box, as typed, and hand it to the post. """
+        world = _acting()
+        package = _existing(world, 'game.package', package_id)
+        if not isinstance(address, str):
+            raise UserError(world.env._("An address is written as text."))
+        package._send(address)
         return world._snapshot(request.env.user)

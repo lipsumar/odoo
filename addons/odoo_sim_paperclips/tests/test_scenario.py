@@ -16,6 +16,8 @@ from odoo import Command, fields
 from odoo.addons.base.models.ir_mail_server import IrMail_Server
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.odoo_sim.models.game_post import address_words
+
 
 class TestPaperclips(TransactionCase):
 
@@ -145,9 +147,10 @@ class TestPaperclips(TransactionCase):
             self.skipTest("Binder & Co. already has an order under way in this world")
         if not wanted:
             wanted = self.customer._place_order()
-            request = self.env['game.email'].search([('subject', '=', "Order: 200 Paperclip")], limit=1)
+            request = wanted.email_id
             self.env['game.email.delivery']._deliver()
             self.assertEqual(request.delivery_ids.route, 'player', "it lands in the player's inbox")
+            self.assertIn("12 Clip Lane", request._content()['body'], "saying where to send the goods")
         self.assertEqual((wanted.product_id, wanted.qty), (self.clip, 200))
 
         self.buy_a_spool()
@@ -184,12 +187,25 @@ class TestPaperclips(TransactionCase):
                          (invoice.amount_total, invoice.payment_reference, self.customer.partner_id))
         self.assertEqual(self.earned(), (invoice.amount_total, invoice.amount_total))
 
-        # ... and the player ships, and records it -- these 200, whatever else
-        # a played world's open deliveries may have reserved.
-        wanted._deliver()
+        # ... and the player packs the paperclips, posts them to the address
+        # Binder & Co. gave, and records the delivery -- these 200, whatever
+        # else a played world's open deliveries may have reserved.
+        package = self.env['game.package']._new()
+        package._pack(self.clip, wanted.qty)
+        package._send(self.customer.address)
+        self.world._settle(package.date_arrival)
         for move in sale.picking_ids.move_ids:
             move.quantity = move.product_uom_qty
         sale.picking_ids.move_ids.picked = True
         sale.picking_ids.button_validate()
+        self.assertEqual((package.state, package.customer_id), ('delivered', self.customer))
         self.assertEqual(wanted.state, 'delivered')
         self.assertOdooMovedWithTheWorld()
+
+    def test_binder_and_co_can_be_found_at_the_address_odoo_has(self):
+        """ The two halves agree at the start: the contact's address in Odoo is where the post finds it. """
+        partner = self.customer.partner_id
+        if not partner.street:
+            self.skipTest("Binder & Co.'s contact predates its address: this world was upgraded into packages")
+        written =f"{partner.name}\n{partner.street}\n{partner.city}, {partner.state_id.code} {partner.zip}\n{partner.country_id.name}"
+        self.assertEqual(address_words(written), address_words(self.customer.address))

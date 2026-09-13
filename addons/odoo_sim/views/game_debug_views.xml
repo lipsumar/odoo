@@ -32,7 +32,8 @@
             <field name="uom_id"/>
             <field name="production_id"/>
             <field name="shipment_id"/>
-            <field name="customer_order_id"/>
+            <field name="package_id"/>
+            <field name="customer_order_id" optional="hide"/>
         </list>
     </field>
 </record>
@@ -117,6 +118,8 @@
             <field name="payment_delay"/>
             <field name="interval"/>
             <field name="write_to"/>
+            <field name="address"/>
+            <field name="complain_after"/>
             <field name="next_order_date"/>
         </list>
     </field>
@@ -135,7 +138,28 @@
             <field name="amount_paid"/>
             <field name="currency_id" column_invisible="1"/>
             <field name="date_paid"/>
+            <field name="qty_received"/>
             <field name="date_delivered"/>
+            <field name="date_chase"/>
+            <field name="complaint_count"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_package_view_list" model="ir.ui.view">
+    <field name="model">game.package</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="display_name" string="Package"/>
+            <field name="state"/>
+            <field name="line_ids" widget="many2many_tags"/>
+            <field name="address"/>
+            <field name="date_posted"/>
+            <field name="date_arrival"/>
+            <field name="customer_id"/>
+            <field name="order_id"/>
+            <field name="return_reason"/>
+            <field name="date_returned" optional="hide"/>
         </list>
     </field>
 </record>
@@ -220,6 +244,10 @@
     </field>
 </record>
 
+<record id="game_package_action" model="ir.actions.act_window">
+    <field name="name">Packages</field>
+    <field name="res_model">game.package</field>
+</record>
 <record id="game_email_action" model="ir.actions.act_window">
     <field name="name">Post</field>
     <field name="res_model">game.email</field>
@@ -262,6 +290,7 @@
     <menuitem id="menu_game_customer" action="game_customer_action" sequence="100"/>
     <menuitem id="menu_game_customer_order" action="game_customer_order_action" sequence="110"/>
     <menuitem id="menu_game_customer_invoice" action="game_customer_invoice_action" sequence="120"/>
+    <menuitem id="menu_game_package" action="game_package_action" sequence="125"/>
     <menuitem id="menu_game_email" action="game_email_action" sequence="130"/>
     <menuitem id="menu_game_email_delivery" action="game_email_delivery_action" sequence="140"/>
 </menuitem>

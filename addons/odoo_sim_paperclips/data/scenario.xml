@@ -34,6 +34,11 @@
         <field name="name">Binder &amp; Co.</field>
         <field name="is_company" eval="True"/>
         <field name="email">purchasing@binder-co.example.com</field>
+        <field name="street">12 Clip Lane</field>
+        <field name="city">Springfield</field>
+        <field name="state_id" ref="base.state_us_32"/>
+        <field name="zip">97477</field>
+        <field name="country_id" ref="base.us"/>
     </record>
 
     <record id="product_wire" model="product.product">
@@ -111,8 +116,9 @@
 
     <!--
         Buys 200 paperclips at a time and pays up to 0.08 for each, taxes
-        included; pays four game hours after it agrees with an invoice, and
-        asks again a game day after it has its goods.  It starts with 1000 in
+        included; pays four game hours after it agrees with an invoice;
+        complains if it has not had its goods three game days after paying;
+        and asks again a game day after it has them.  It starts with 1000 in
         the bank; the company starts with nothing.
     -->
     <record id="customer_binder" model="game.customer">
@@ -122,6 +128,7 @@
         <field name="max_price">0.08</field>
         <field name="payment_delay">4</field>
         <field name="interval">24</field>
+        <field name="complain_after">72</field>
     </record>
 
 </data>
@@ -141,5 +148,13 @@
 -->
 <function model="game.customer" name="_introduce"
           eval="[ref('customer_binder'), ref('base.user_admin'), 'you@paperclips.example.com']"/>
+
+<!--
+    Where the post finds Binder & Co., which it tells the player when it
+    orders; its contact in Odoo starts out saying the same.  Fills in a blank
+    only, so a world upgrading into packages gets it too.
+-->
+<function model="game.customer" name="_give_address"
+          eval="[ref('customer_binder'), 'Binder &amp; Co.\n12 Clip Lane\nSpringfield, OR 97477\nUnited States']"/>
 
 </odoo>

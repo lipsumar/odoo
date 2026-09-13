@@ -16,7 +16,10 @@ KINDS = [
     ('manufactured', "Manufactured"),
     ('consumed', "Consumed"),
     ('received', "Received"),
+    # Shipped straight to a customer, before goods went by post (1.2).
     ('delivered', "Delivered"),
+    ('packed', "Packed"),
+    ('unpacked', "Unpacked"),
 ]
 
 
@@ -50,7 +53,7 @@ class GameStock(models.Model):
     )
 
     @api.model
-    def _apply(self, product, qty, kind, *, date=None, production=None, shipment=None, customer_order=None):
+    def _apply(self, product, qty, kind, *, date=None, production=None, shipment=None, package=None):
         """ Change how much of ``product`` exists by ``qty``, and record why.
 
         **The only write path into reality.**  Everything that makes goods
@@ -61,8 +64,8 @@ class GameStock(models.Model):
         ``qty`` is signed, in the product's own unit.  ``date`` is the game
         instant the event happened, which is not always now -- a production run
         that finished at 14:00 and was settled by a cron at 14:07 happened at
-        14:00.  ``production`` / ``shipment`` / ``customer_order`` name the world
-        event responsible.
+        14:00.  ``production`` / ``shipment`` / ``package`` name the world event
+        responsible.
 
         Raises ``UserError`` rather than taking more than exists.
         """
@@ -109,7 +112,7 @@ class GameStock(models.Model):
             'kind': kind,
             'production_id': production.id if production else False,
             'shipment_id': shipment.id if shipment else False,
-            'customer_order_id': customer_order.id if customer_order else False,
+            'package_id': package.id if package else False,
         })
 
 
@@ -130,5 +133,8 @@ class GameStockEntry(models.Model):
         'game.production', "Production run", readonly=True, index='btree_not_null', ondelete='restrict')
     shipment_id = fields.Many2one(
         'game.shipment', "Shipment", readonly=True, index='btree_not_null', ondelete='restrict')
+    package_id = fields.Many2one(
+        'game.package', "Package", readonly=True, index='btree_not_null', ondelete='restrict')
+    # Shipped straight to a customer, before goods went by post (1.2).
     customer_order_id = fields.Many2one(
         'game.customer.order', "Customer order", readonly=True, index='btree_not_null', ondelete='restrict')

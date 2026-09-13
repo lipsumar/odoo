@@ -14,7 +14,7 @@ const wire = { id: 1, name: 'Wire', uom: 'm' };
 const clip = { id: 2, name: 'Paperclip', uom: 'Units' };
 
 /** A snapshot, as `game.world._snapshot` builds one. */
-function world({ run = null, shipments = [], bank = null, orders = [] } = {}) {
+function world({ run = null, shipments = [], bank = null, orders = [], packages = [], sent = [] } = {}) {
     return {
         stock: [{ ...wire, qty: 49.9 }, { ...clip, qty: 0 }],
         workstations: [{
@@ -29,6 +29,8 @@ function world({ run = null, shipments = [], bank = null, orders = [] } = {}) {
         shipments,
         bank,
         customer_orders: orders,
+        packages,
+        sent_packages: sent,
     };
 }
 
@@ -158,8 +160,7 @@ test('an order says what the customer wants, and waits for an invoice', () => {
     assert.equal(shown.title, 'Binder & Co. wants 200 Paperclip');
     assert.equal(shown.terms, 'Pays up to €0.08 each, taxes included');
     assert.equal(shown.status, 'Waiting for your invoice');
-    assert.equal(shown.ship, null);
-    assert.equal(shown.canShip, false);
+    assert.equal(shown.tone, 'wait');
 });
 
 test('a refused invoice says why', () => {
@@ -167,33 +168,93 @@ test('a refused invoice says why', () => {
 
     assert.equal(shown.status, 'Refused INV/2030/00001: Too dear.');
     assert.equal(shown.tone, 'fault');
-    assert.equal(shown.canShip, false);
 });
 
-test('an accepted invoice says when it will be paid, and nothing ships before', () => {
+test('an accepted invoice says when it will be paid', () => {
     const shown = shownOrder({ state: 'invoiced', invoice: accepted });
 
     assert.equal(shown.status, 'Accepted INV/2030/00001 for €11.50; pays 1 Mar 2030, 13:00');
-    assert.equal(shown.canShip, false);
 });
 
-test('once due, a payment counts, settled or not', () => {
+test('once due, a payment is on its way, settled or not', () => {
     const shown = shownOrder({ state: 'invoiced', invoice: accepted }, '2030-03-01T13:00:00Z');
 
     assert.equal(shown.status, 'Paying INV/2030/00001…');
-    assert.equal(shown.ship, 'Ship 200 Paperclip');
-    assert.equal(shown.canShip, true);
+    assert.equal(shown.tone, 'ready');
 });
 
-test('a paid order ships what was paid for', () => {
+test('a paid order says what was paid for, which is what to send', () => {
     const paid = { state: 'paid', qty_paid: 150, amount_paid: 9, invoice: { ...accepted, state: 'paid', qty: 150 } };
     const shown = shownOrder(paid);
 
-    assert.equal(shown.status, 'Paid €9.00');
-    assert.equal(shown.ship, 'Ship 150 Paperclip');
-    assert.equal(shown.canShip, true);
+    assert.equal(shown.status, 'Paid €9.00 for 150 Paperclip');
+    assert.equal(shown.tone, 'ready');
+});
 
-    assert.equal(shownOrder(paid, undefined, { pending: new Set(['order:9']) }).canShip, false, 'pressed');
+const box = { id: 12, name: 'Package 12', address: null, lines: [], date_posted: null, returned: null, date_returned: null };
+
+function shownPost(overrides, { pending = new Set(), reading = running('2030-03-01T12:00:00Z') } = {}) {
+    return describeWorld({ world: world(overrides), reading, pending }, UTC).post;
+}
+
+test('a new package is empty, and offers what is on the shelves to put in it', () => {
+    const post = shownPost({ packages: [box] });
+    const [shown] = post.bench;
+
+    assert.equal(post.canTake, true);
+    assert.equal(shown.title, 'Package 12');
+    assert.equal(shown.contents, 'Empty');
+    assert.deepEqual(shown.products, [{ id: 1, label: 'Wire (49.9 m)' }], 'not the paperclips there are none of');
+    assert.equal(shown.canPack, true);
+    assert.equal(shown.canSend, false, 'nothing to send');
+    assert.equal(shown.address, '');
+    assert.equal(shown.returned, null);
+});
+
+test('a package with something in it can be sent', () => {
+    const [shown] = shownPost({ packages: [{ ...box, lines: [{ ...clip, qty: 200 }, { ...wire, qty: 0.5 }] }] }).bench;
+
+    assert.equal(shown.contents, '200 Paperclip, 0.5 m Wire');
+    assert.equal(shown.canSend, true);
+});
+
+test('a returned package says so, and keeps the address it went to', () => {
+    const [shown] = shownPost({ packages: [{
+        ...box,
+        lines: [{ ...clip, qty: 200 }],
+        address: 'Binder & Co.\nNowhere',
+        returned: 'Nobody lives at this address.',
+        date_returned: '2030-03-03T09:00:00',
+    }] }).bench;
+
+    assert.equal(shown.returned, 'Returned 3 Mar 2030, 09:00: Nobody lives at this address.');
+    assert.equal(shown.address, 'Binder & Co.\nNowhere');
+});
+
+test('nothing is packed or sent while a press waits, or in a world that is not running', () => {
+    const packages = [{ ...box, lines: [{ ...clip, qty: 1 }] }];
     const paused = { gameNow: new Date('2030-03-01T12:00:00Z'), rate: 1440, paused: true, running: false };
-    assert.equal(shownOrder(paid, undefined, { reading: paused }).canShip, false, 'paused');
+    for (const [why, post] of [
+        ['pressed', shownPost({ packages }, { pending: new Set(['package:12', 'package:new']) })],
+        ['paused', shownPost({ packages }, { reading: paused })],
+    ]) {
+        const [shown] = post.bench;
+        assert.deepEqual([post.canTake, shown.canPack, shown.canSend, shown.canUnpack], [false, false, false, false], why);
+    }
+});
+
+test('a sent package says what went where, and when, but not where it is now', () => {
+    const [shown] = shownPost({ sent: [{
+        ...box,
+        lines: [{ ...clip, qty: 200 }],
+        address: 'Binder & Co.\n12 Clip Lane\nSpringfield, OR 97477',
+        date_posted: '2030-03-01T10:00:00',
+    }] }).sent;
+
+    assert.deepEqual(shown, {
+        key: 12,
+        title: 'Package 12: 200 Paperclip',
+        to: 'Binder & Co., 12 Clip Lane, Springfield, OR 97477',
+        date: 'Sent 1 Mar 2030, 10:00',
+    });
 });

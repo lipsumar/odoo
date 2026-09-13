@@ -10,3 +10,4 @@ from . import purchase_order
 from . import game_bank
 from . import account_bank_feed
 from . import game_customer
+from . import game_post

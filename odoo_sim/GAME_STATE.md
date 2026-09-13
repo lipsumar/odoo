@@ -1,7 +1,7 @@
 # Odoo Sim — The Game World's Own State
 
 Status: built for manufacturing, purchasing and selling, with money in a game bank,
-and the paperclip scenario (§12)
+goods sent by post, and the paperclip scenario (§12)
 Branch: `odoo-sim`
 Target: Odoo 19.0
 Companion to `DESIGN.md` (the clock), `UI_DESIGN.md` (the page) and `MAIL.md`
@@ -27,10 +27,14 @@ models and never defines. v1 covers two ways goods come into the world:
 
 And one way goods leave it:
 
-- **Sold** goods leave the world when the player ships them *in the world*,
-  once the customer has paid. The customer asks for goods; the player sends it
-  an invoice; it pays, if it agrees with the invoice; the player ships.
-  Validating the delivery in Odoo comes after, if at all.
+- **Sold** goods leave the shelves when the player packs them *in the world*,
+  and reach the customer when the post delivers the box. The customer asks for
+  goods, and says where it lives; the player sends it an invoice; it pays, if
+  it agrees with the invoice; the player packs the goods, writes the address on
+  the box by hand, and posts it; a game day later the post delivers it, if
+  anyone lives at that address, and brings it back if nobody does. A customer
+  that has paid and is still waiting writes to complain. Validating the
+  delivery in Odoo comes after, if at all.
 
 Money is the same problem again, and matters more, because it is the score.
 Odoo records what the company says it was paid; the **game bank** holds what
@@ -70,8 +74,12 @@ every world write shares a transaction with the Odoo writes around it
 
 | model | what it is |
 |---|---|
-| `game.stock.entry` | append-only ledger: `date`, `product_id`, signed `qty`, `kind` (`genesis` / `manufactured` / `consumed` / `received` / `delivered`), and the world event responsible (`production_id`, `shipment_id` or `customer_order_id`) |
+| `game.stock.entry` | append-only ledger: `date`, `product_id`, signed `qty`, `kind` (`genesis` / `manufactured` / `consumed` / `received` / `packed` / `unpacked`), and the world event responsible (`production_id`, `shipment_id` or `package_id`). `delivered` and `customer_order_id` are history: goods shipped straight to a customer before they went by post (1.2) |
 | `game.stock` | one row per product: `qty`, with `CHECK (qty >= 0)` |
+
+Without locations (§14), `game.stock` is what is **on the shelves**. Goods
+packed in a box are off them, on the box's own lines (§7.4), until it is
+unpacked or leaves with the post.
 
 The balance is a cache of the ledger's sum, kept for one reason: a `CHECK` on a
 single row is what makes "you cannot consume what is not there" hold under
@@ -86,7 +94,7 @@ the bench. A test pins this, and fails with the digits removed.
 
 ### 3.2 One write path
 
-`game.stock._apply(product, qty, kind, *, date, production, shipment, customer_order)` is the
+`game.stock._apply(product, qty, kind, *, date, production, shipment, package)` is the
 **only** way reality changes. It writes the ledger row and updates the balance
 in the caller's transaction. A take is a single
 `UPDATE ... WHERE qty + delta >= 0`; if no row changes, it raises `UserError`
@@ -192,15 +200,23 @@ In `models/game_customer.py`.
 `game.customer` is an automated buyer: a `partner_id`, the product it buys,
 how much per order (`qty`, in the product's unit), the most it pays per unit
 **taxes included** (`max_price`), how long after agreeing to an invoice it
-pays (`payment_delay`, game hours), how long after receiving its goods it
-orders again (`interval`), and the address it has for the company
-(`write_to`).
+pays (`payment_delay`, game hours), how long after paying it waits for its
+goods before complaining (`complain_after`, §7.5), how long after receiving
+its goods it orders again (`interval`), the email address it has for the
+company (`write_to`), and **its postal address** (`address`), where the post
+finds it (§7.4).
+
+The postal address is **world data**, like the recipe. The customer's contact
+in Odoo has an address too, but that is the player's copy, and the world never
+reads it (§2). The customer tells the company where it lives in every order
+email; putting that in Odoo, and on a box, is the player's work.
 
 A customer has **one order open at a time**. The customer-order cron
 (triggered when a customer is created and at its `next_order_date`, hourly as
 a safety net) has every customer with nothing open, whose time has come, place
 a `game.customer.order` -- a copy of its terms at that moment -- and write to
-the company about it.
+the company about it ("Please send them by post to: …"). The order keeps that
+email (`email_id`), which its complaints follow up.
 
 **Everything a customer says is email** (`MAIL.md`), sent from its contact
 with `game.email._send_from` by `_write_to_company`. An order goes to
@@ -208,6 +224,8 @@ with `game.email._send_from` by `_write_to_company`. An order goes to
 given an address if they have none, so it lands in their inbox on `/game`. A
 reply goes where the email it answers asked (its Reply-To, else its sender),
 threaded under it, so a refusal files itself with the invoice's thread. A
+follow-up to one of its own emails goes where that one went, threaded under
+it too. A
 customer with nowhere to write still orders: a warning is logged, and `/game`
 shows the order.
 
@@ -262,16 +280,69 @@ moment.") and its order goes back to waiting for an invoice. The payment is
 tried under a savepoint, so one empty account does not stop the world
 settling.
 
-### 7.4 Delivery
+### 7.4 Delivery: the post
 
-**Ship** (`order._deliver()`) is the player's action, and is when the goods
-leave the world, as `delivered` entries. It is refused before the customer has
-paid -- the customer's terms: there is nothing to ship until the money is in --
-after the order has shipped, and when the world does not hold the goods. It
-settles first, so a payment due by the clock counts. The customer orders again
-`interval` game hours later.
+In `models/game_post.py`.
 
-Validating the delivery in Odoo is recording it, and ships nothing.
+**Goods reach a customer by post, and the post knows nothing but the address
+on the box.** Nothing links a package to an order, an invoice or a payment:
+the player packs a box, writes an address on it, and sends it.
+
+`game.package` goes `open` → `in_transit` → `delivered`, or `in_transit` →
+`returning` → `open` again. An open box can be `unpacked`. Its contents are
+`game.package.line`s, one per product, in the product's own unit.
+
+| action | what happens |
+|---|---|
+| **New package** (`_new()`) | an empty, `open` box on the bench |
+| **Put in** (`_pack(product, qty)`) | the goods leave the shelves as `packed` entries, onto the box's line for that product. Refused for what the world does not hold, and for a quantity that rounds to nothing |
+| **Unpack** (`_unpack()`) | everything goes back on the shelves as `unpacked` entries, and the box is put away |
+| **Send** (`_send(address)`) | the address is written on the box as typed, with the blanks at the ends of its lines trimmed, and the post has it: `in_transit`, arriving `TRANSIT_HOURS` (24 game hours) later, settled by §9. Refused for an empty box or a blank address |
+
+All four settle first, lock the box `FOR UPDATE`, and are refused once it has
+been sent or unpacked. **The address is not checked when sending.** A post
+office takes whatever is written on a box, and finds out when it gets there.
+
+**At arrival** (`_arrive()`), the post reads the address. It reads **the words,
+in order** (`address_words`): case, punctuation and line breaks do not matter,
+so "BINDER & CO., 12 clip lane" is "Binder & Co.\n12 Clip Lane". A missing
+word, an extra one, a typo or two lines swapped make a different address. Then:
+
+- **A customer's `address` has the same words:** the package is `delivered` to
+  it (`game.customer._receive_package`).
+- **Nobody's does:** it is `returning`, and takes the same time again to come
+  back. It is then `open` on the bench again, still full, with a
+  `return_reason` ("Nobody lives at this address."). The player can write a
+  new address on it and send it again, or unpack it.
+
+**Receiving.** A customer keeps everything in the box. What it buys counts
+toward its open order (`qty_received`), **paid for or not**. Sending the goods
+before the money is in is the company's risk to take, and the customer still
+pays only an invoice it agrees with. Other products, and goods that arrive
+with no order open, it just keeps.
+
+An order is `delivered` (*Received*) once it is `paid` and `qty_received ≥
+qty_paid`, as of whichever came last: the payment or the package
+(`order._complete(at)`, called by both). The customer orders again `interval`
+game hours after that.
+
+Nothing is written to the ledger on delivery: the goods left the shelves when
+they were packed, and leave the world with the box. Validating the delivery in
+Odoo is recording it, and ships nothing.
+
+### 7.5 Complaints
+
+A payment going through sets the order's `date_chase` to `complain_after`
+game hours later. If the order is still `paid` then -- nothing has arrived, or
+not enough -- the settle (§9) has the customer complain (`order._complain()`).
+It writes to where it sent its order, threaded under that email: "Where are
+our 200 Paperclip?". The email says what it paid and under which reference,
+what it has had ("and have not received them" / "and have received only
+60"), and its address again.
+
+It complains again every `complain_after` until the goods come
+(`complaint_count`). Goods arriving before `date_chase` spare the email, and an
+order not yet paid for is never chased.
 
 ## 8. Money: the game bank
 
@@ -353,12 +424,23 @@ capital, if a scenario wants one, would be the same kind of deposit.
 
 ## 9. Time: settling what is due
 
-`game.world._settle(now=None)` finishes every run whose `date_end` has passed,
-marks every shipment whose `date_arrival` has passed as arrived, and pays every
-accepted customer invoice whose `date_due` has passed. It runs:
+`game.world._settle(now=None)`, for everything due by `now`:
+
+1. finishes every run whose `date_end` has passed;
+2. marks every shipment whose `date_arrival` has passed as arrived;
+3. pays every accepted customer invoice whose `date_due` has passed;
+4. delivers every package in the post whose `date_arrival` has passed, or turns
+   it back;
+5. puts back on the bench every returning package whose return is due, which
+   may be one turned back in step 4;
+6. has every customer still waiting past `date_chase` complain.
+
+Complaints come last, so a package due by `now` spares its customer the email.
+It runs:
 
 - **from the settle cron**, triggered at each run's end, each shipment's
-  arrival and each payment's due time (`ir.cron._trigger(at)`). A future trigger does not wake the loop
+  arrival, each payment's due time, each package's arrival and return, and each
+  complaint's due time (`ir.cron._trigger(at)`). A future trigger does not wake the loop
   (`ir_cron.py` `_trigger_list` only notifies for triggers already due), so it
   lands on the loop's next poll, up to one cron tick late
   (`cron-tick × rate` game seconds, DESIGN.md §4.3). Both crons also have a
@@ -376,10 +458,13 @@ transaction (a test pins it). Settling twice makes the goods once.
 
 | route | what |
 |---|---|
-| `GET /game/api/world` | `game.world._snapshot()`: stock (including zero lines for everything the world makes, uses, buys or sells), workstations with their recipe, current run and open MOs, shipments not yet accepted, the company's bank account (balance and its last ten transactions), and customer orders not yet delivered, each with the last invoice its customer read |
+| `GET /game/api/world` | `game.world._snapshot()`: stock (including zero lines for everything the world makes, uses, buys or sells), workstations with their recipe, current run and open MOs, shipments not yet accepted, the company's bank account (balance and its last ten transactions), customer orders not yet received, each with the last invoice its customer read, the packages on the bench (with why a returned one came back), and the last ten sent. A sent package shows what went, where to and when, and **never where it is now**: the post has no tracking |
 | `POST /game/api/workstations/<id>/start` | `{qty, production_id?}` → start a run, answer with the snapshot |
 | `POST /game/api/shipments/<id>/accept` | accept a delivery, answer with the snapshot |
-| `POST /game/api/customer_orders/<id>/deliver` | ship a paid order, answer with the snapshot |
+| `POST /game/api/packages` | take an empty box, answer with the snapshot |
+| `POST /game/api/packages/<id>/pack` | `{product_id, qty}` → put goods in it, answer with the snapshot |
+| `POST /game/api/packages/<id>/unpack` | put its goods back on the shelves, answer with the snapshot |
+| `POST /game/api/packages/<id>/send` | `{address}` → write the address on it and post it, answer with the snapshot |
 
 Guards, on every route:
 
@@ -416,9 +501,15 @@ elements in place rather than rebuilding them, because it re-renders on every
 pulse, and a rebuilt input loses what the player was typing into it. Run
 progress is interpolated from the clock reading. The *Bank* panel shows the
 balance and the last transactions, signed from the company's side; *Customer
-orders* shows each order's terms and where it stands, and *Ship* once it is
-paid -- or once its payment is due by the clock, as *Accept delivery* appears
-at arrival time, since shipping settles first.
+orders* shows each order's terms and where it stands. *Post* has *New
+package*, and for each box on the bench:
+
+- what is in it, with a product from the shelves and a quantity to *Put in*;
+- an address to write, filled in once with whatever was last written on the box,
+  so a returned box shows the address that failed, ready to correct;
+- *Send* (once the box holds something and has an address) and *Unpack*.
+
+Below that, what was sent.
 
 ## 11. Protection, and a window for debugging
 
@@ -426,7 +517,8 @@ at arrival time, since shipping settles first.
 `base.group_system`, and nothing to anyone else, the bank included. *Settings →
 Technical → Game World* (debug mode) lists the balance, the ledger, runs,
 shipments, recipes, workstations, vendors, bank accounts and transactions,
-customers, their orders and the invoices they read, read-only.
+customers, their orders and the invoices they read, and packages (where each
+one really is), read-only.
 
 **An administrator can still cheat.** A server action with Python code can
 `sudo()` its way into anything. That is treated like editing a save file,
@@ -443,15 +535,19 @@ at install:
 | **Wire**, in m, Buy route; bought from *Tensile Wire Supply* in **Spool (50 m)** at 12.50, 1 day lead time | vendor ships wire only, arriving 24 game hours after it gets the order |
 | **Paperclip**, in Units, Manufacture route | recipe: **0.1 m wire, 2 game minutes** per paperclip |
 | BoM: 1 paperclip = 0.1 m wire; one operation, *Manufacture paperclip*, 2 min, on work center *Paperclip bench* | workstation *Paperclip bench*, linked to that work center |
-| **Binder & Co.**, a contact; Paperclip sells at 0.05 plus the default sales tax; the administrator gets the address `you@paperclips.example.com` if they have none | customer: 200 paperclips an order, at most **0.08 each, taxes included**; emails its orders to the administrator; pays 4 game hours after agreeing to an invoice; orders again a game day after delivery; **1000 in the bank** |
+| **Binder & Co.**, a contact at 12 Clip Lane, Springfield, OR 97477, United States; Paperclip sells at 0.05 plus the default sales tax; the administrator gets the address `you@paperclips.example.com` if they have none | customer: 200 paperclips an order, at most **0.08 each, taxes included**; emails its orders to the administrator; pays 4 game hours after agreeing to an invoice; the post finds it at `Binder & Co. / 12 Clip Lane / Springfield, OR 97477 / United States`, which it gives in its orders; complains 3 game days after paying if its paperclips have not come; orders again a game day after receiving them; **1000 in the bank** |
 
 It enables work orders and units of measure for employees. It starts with no
 stock, and the company with no money: the customer's payments are the first. Everything the player may change is `noupdate`, so upgrading the module
 never undoes their edits to the BoM or the prices.
 
-At `--rate 720` a paperclip takes a tenth of a real second, a delivery two
-real minutes, and a customer pays twenty real seconds after reading its
-invoice.
+At `--rate 720` a paperclip takes a tenth of a real second, a delivery or a
+package two real minutes, a customer pays twenty real seconds after reading
+its invoice, and complains six real minutes after paying.
+
+The customer's postal address is given by a `<function>` (`_give_address`)
+that fills a blank only, like `_introduce`, so a world upgrading into packages
+gets it too.
 
 ## 13. Known issues and risks
 
@@ -483,8 +579,22 @@ invoice.
   the bank being right, but it can surprise.
 - **A customer never gives up.** An order nobody invoices stays open forever,
   and its customer never orders again.
-- **Payments lag by one cron tick**, like settling (§9). Harmless: shipping
-  settles first.
+- **Payments lag by one cron tick**, like settling (§9). Harmless: nothing the
+  player does waits on one.
+- **The page gives away a delivery.** The post has no tracking, but *Customer
+  orders* drops an order once its goods are received. That panel predates the
+  post, and it shows refusals the customer also writes about.
+- **A package remembers its last trip only.** Sending a returned box again
+  overwrites its address, dates and return reason.
+- **A customer keeps goods it did not order**, and says nothing: the extra
+  paperclips in a box, or a box that arrives with no order open, are simply
+  the company's loss.
+- **Two customers at one address**: the post delivers to the one created first.
+- **Two packages for one order arriving in concurrent settles** can fail one
+  of them with a serialization error, as concurrent settles can (above).
+- **Orders paid before 1.3** waited for a *Ship* button that is gone. The
+  upgrade gives them a `date_chase` from the moment of upgrading, and they wait
+  for a package like any other.
 
 ## 14. Out of scope, and next
 
@@ -501,7 +611,9 @@ invoice.
 - Customers that answer the rest of their mail: questions, quotations,
   reminders.
 - Customers who negotiate, cancel, pay late, order different things, or come
-  and go.
+  and go; who send back what they did not order.
+- A post that charges postage, takes longer to farther addresses, loses
+  things, or sells tracking.
 - Players creating recipes; employees pressing buttons.
 
 ## 15. Testing
@@ -526,16 +638,24 @@ and the feed (what a line says, signs, once only, a deleted line coming back,
 unconnected accounts, the trigger). `test_customer.py`: asking and asking
 again, one order at a time, reading once, the snapshot of an invoice, every
 refusal, partial invoices, contacts, an empty account, drafts and credit
-notes, shipping (what was paid for, not before, not twice, not what is not
-there), the page's view, and shipping over HTTP; and their mail (orders landing
-in the player's inbox, an invoice read only once emailed and only by its own
-customer, other mail left alone, a refusal answering the invoice's email).
-Three more premise tests:
-**registering a payment or typing a statement line in Odoo moves no money, and
-validating a delivery ships nothing.**
+notes, the page's view; and their mail (orders landing in the player's inbox
+with the address to send to, an invoice read only once emailed and only by its
+own customer, other mail left alone, a refusal answering the invoice's email).
+`test_post.py`: reading an address, packing (off the shelves, one line a
+product, not what is not there, unpacking), sending (not empty, not
+unaddressed, not twice, the arrival scheduled), the post (taking its time, any
+spelling of the same words, a word missing or out of place, coming back full
+and being sent again), receiving (paid and received, goods before payment,
+short packages, extra goods, goods nobody ordered), complaints (when, to whom,
+on which thread, again and again, a short delivery, none when the goods come
+in time or before payment), the page's view (the bench, what was sent without
+where it is, a returned box), and packing and sending over HTTP. Three more
+premise tests: **registering a payment or typing a statement line in Odoo
+moves no money, and validating a delivery ships nothing.**
 
 `odoo_sim_paperclips/tests/` plays the scenario honestly -- buying and making,
-then selling to Binder & Co. and getting paid -- and checks that Odoo moved
+then selling to Binder & Co., getting paid, and posting the paperclips to the
+address its order email gives -- and checks that Odoo moved
 exactly as the world did, goods and money alike. It compares movements rather than totals,
 and first settles whatever the world already had in flight, because it has to
 pass on a world someone has been playing in (DESIGN.md §8).
@@ -573,6 +693,11 @@ Checked by hand at `--rate 720`, through `game_run` and headless Chrome:
 | What keeps score? | **The game bank** (§8). Only game transactions move it, never Odoo data. |
 | How does Odoo learn of a payment? | **A bank feed** importing statement lines, deduplicated by the bank's transaction identifier (§8.3). |
 | Does a customer pay whatever it is invoiced? | **No.** It pays on its terms: what it asked for, at its price or less, taxes included (§7.2). |
-| When do the goods leave? | **When the player ships, after payment** (§7.4). |
+| When do the goods leave? | **Off the shelves when packed; out of the company with the post.** The customer has them when the post delivers the box to its address (§7.4). |
+| How does the post read an address? | **The same words in the same order**, whatever the case, punctuation and line breaks (§7.4). |
+| A box addressed to nobody? | **Comes back to the bench, full**, after the transit time again (§7.4). |
+| Goods before payment? | **Kept, and counted toward the order.** Sending first is the company's risk; the post cannot know who has paid (§7.4). |
+| Whose address does the post use? | **The customer's own, in the world.** The contact's address in Odoo is the player's copy (§7.1). |
+| Can the player track a package? | **No.** A customer still waiting after `complain_after` writes to say so (§7.5). |
 | How does a customer learn of an invoice? | **By email.** The player sends it, the post office delivers it, and the customer's mail cron reads it (§7.2). Posting alone tells the customer nothing. |
 | Does the company start with money? | **No**, unlike stock: the score starts from what the game gives (§8.4). |

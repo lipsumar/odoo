@@ -7,6 +7,7 @@ from odoo import api, fields, models
 from odoo.tools import SQL
 
 from odoo.addons.odoo_sim import pulse
+from odoo.addons.odoo_sim.models.game_post import SENT_STATES
 
 #: Bus notification type saying "the world changed; fetch it again".  Rides the
 #: pulse's channel, and **carries nothing**: any websocket, logged in or not,
@@ -19,6 +20,9 @@ OPEN_MO_STATES = ('confirmed', 'progress', 'to_close')
 
 #: How many of the company's bank transactions the page shows.
 BANK_LINES = 10
+
+#: How many of the packages the company has sent the page shows.
+SENT_PACKAGES = 10
 
 
 def _instant(value):
@@ -38,7 +42,9 @@ class GameWorld(models.AbstractModel):
 
         Runs that have ended put their goods into the world; shipments whose
         arrival time has passed are at the door; customers pay the invoices
-        they agreed to pay.  Run by a cron triggered at each due instant, and
+        they agreed to pay; the post reaches the addresses on its packages, and
+        brings back the ones addressed to nobody; customers still waiting for
+        what they paid for complain.  Run by a cron triggered at each due instant, and
         at the start of every player action, so that an action always sees
         the world as of the moment it was taken -- the cron alone lags by up to
         one cron tick (``cron-tick x rate`` game seconds).
@@ -53,9 +59,17 @@ class GameWorld(models.AbstractModel):
         shipments.state = 'arrived'
         invoices = self._lock_due('game.customer.invoice', 'to_pay', 'date_due', now)
         invoices._pay()
-        if runs or shipments or invoices:
+        packages = self._lock_due('game.package', 'in_transit', 'date_arrival', now)
+        packages._arrive()
+        # After arriving: a box addressed to nobody may be back already, by ``now``.
+        returned = self._lock_due('game.package', 'returning', 'date_arrival', now)
+        returned._come_back()
+        # Last, so that goods arriving by ``now`` spare their customer the email.
+        chased = self._lock_due('game.customer.order', 'paid', 'date_chase', now)
+        chased._complain()
+        if runs or shipments or invoices or packages or returned or chased:
             self._changed()
-        return runs, shipments, invoices
+        return runs, shipments, invoices, packages, returned, chased
 
     def _lock_due(self, model, state, date_field, now):
         records = self.env[model]
@@ -125,7 +139,9 @@ class GameWorld(models.AbstractModel):
     def _snapshot(self, user=None):
         """ The whole world, as ``GET /game/api/world`` hands it to the page:
         what exists, the workstations, deliveries on their way, the company's
-        bank account, and what customers have on order.
+        bank account, what customers have on order, and the packages on the
+        bench and sent.  A sent package says nothing of where it is: the post
+        has no tracking.
 
         One projection for one screen (UI_DESIGN.md 9.4), not a generic read.
         Datetimes are naive UTC ISO, exactly as in the pulse, so the page
@@ -141,6 +157,10 @@ class GameWorld(models.AbstractModel):
         customers = self.env['game.customer'].search([])
         customer_orders = self.env['game.customer.order'].search([('state', '!=', 'delivered')])
         balances = self.env['game.stock'].search([])
+        Package = self.env['game.package']
+        on_the_bench = Package.search([('state', '=', 'open')], order='id')
+        sent = Package.search(
+            [('state', 'in', SENT_STATES)], order='date_posted desc, id desc', limit=SENT_PACKAGES)
         # Read, never opened: this is a GET, and a pure read.
         account = self.env['game.bank.account'].search(
             [('partner_id', '=', self.env.company.partner_id.id)], limit=1)
@@ -182,6 +202,15 @@ class GameWorld(models.AbstractModel):
                 'state': record.state,
                 'reason': record.reason or None,
                 'date_due': _instant(record.date_due),
+            }
+
+        def package(record):
+            return {
+                'id': record.id,
+                'name': record.display_name,
+                'address': record.address or None,
+                'lines': [dict(product(line.product_id), qty=line.qty) for line in record.line_ids],
+                'date_posted': _instant(record.date_posted),
             }
 
         def transaction(record):
@@ -249,6 +278,12 @@ class GameWorld(models.AbstractModel):
                 # The newest: game.customer.invoice is ordered newest first.
                 'invoice': invoice(order.invoice_ids[:1]),
             } for order in customer_orders],
+            'packages': [dict(
+                package(record),
+                returned=(record.return_reason or None) if record.date_returned else None,
+                date_returned=_instant(record.date_returned),
+            ) for record in on_the_bench],
+            'sent_packages': [package(record) for record in sent],
         }
         if user is not None:
             snapshot['mail'] = self.env['game.email']._mailbox(user)
