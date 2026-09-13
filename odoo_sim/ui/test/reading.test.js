@@ -45,5 +45,18 @@ test('a payload reads into what the page shows', () => {
         rate: 1440,
         paused: false,
         running: true,
+        forwardTo: null,
     });
+});
+
+test('a forwarding world says where it is going, in UTC like the rest', () => {
+    const reading = readClock({
+        game_now: '2030-03-01T23:00:00',
+        rate: 1440.0,
+        paused: false,
+        running: false,
+        forward_to: '2030-03-02T08:00:00',
+    });
+    assert.equal(reading.forwardTo.toISOString(), '2030-03-02T08:00:00.000Z');
+    assert.equal(reading.running, false);
 });

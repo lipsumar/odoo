@@ -360,6 +360,34 @@ logged in, telemetry, anything an operator reads — it is wrong and silently so
 at `K = 1440` a `write_date` from an hour ago reads as two months old.
 Meta-state needs an explicit real-time column.
 
+### 5.6 The time bar — built
+
+A bar along the top of the page, sticky, replacing the big centred clock. On
+the left, game time, the date and the world's state. On the right, **Pause**
+(**Resume** while paused) and **Forward to next day** (`DESIGN.md` §3.4).
+
+| route | what |
+|---|---|
+| `POST /game/api/clock/pause` | `{paused}` → pause or resume, answer with the reading |
+| `POST /game/api/clock/forward` | `{tz}` → forward to the next 09:00 in `tz`, answer with the reading |
+
+- Both answer with the pulse payload, so the page applies the answer with
+  `readClock` at once. Both also send a pulse, so every other page follows
+  within moments rather than at the next tick.
+- Internal users only. Both are refused while a forward is under way, and
+  forwarding is refused on a world nothing ticks. Pausing is allowed with or
+  without a loop, since the flag is enough on its own.
+- `tz` is the browser's zone, because that is the zone the page shows time in,
+  so the forward lands on 09:00 *as displayed*. It falls back to the player's
+  Odoo time zone, then UTC.
+- While the reading has `forwardTo`, the bar says *Forwarding to Tuesday
+  09:00…*, both buttons are disabled, and a veil covers everything below the
+  bar. The world and the mail drawer are `inert`, which takes focus away as
+  well as the mouse. The clock in the bar keeps moving with each pulse,
+  stepping through the night, and is the progress indicator.
+- The buttons also wait while a press is in flight, on a stopped world, and on
+  a page whose session or server has gone.
+
 ## 6. Risks
 
 ### 6.1 `static/` is public

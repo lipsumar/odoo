@@ -448,6 +448,10 @@ It runs:
 - **at the start of every player action**, so an action sees the world as of
   the moment it was taken, not as of the last cron.
 
+While the world is forwarding to the next morning (DESIGN.md §3.4), the loop
+moves game time to each instant a cron is due. So the settle cron runs at
+exactly each run's end, each arrival and each payment, with no tick of lag.
+
 Due rows are taken `FOR UPDATE SKIP LOCKED`, after flushing, because the
 select is raw SQL and must see a `date_end` written earlier in the same
 transaction (a test pins it). Settling twice makes the goods once.

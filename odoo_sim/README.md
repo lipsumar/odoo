@@ -306,6 +306,29 @@ The loop keeps ticking while paused; it just doesn't move time. That is
 deliberate — a paused world still publishes its pulse, so a client can tell
 "paused" apart from "the loop died".
 
+On `/game`, the **Pause** button in the bar at the top does the same, and
+turns into **Resume**.
+
+---
+
+## Forwarding to the next day
+
+A business works by day. When you have done everything you can today, press
+**Forward to next day** in the bar at the top of `/game`. The world moves on to
+09:00 the next morning, in your browser's time zone. Everything due overnight
+happens on the way, at the time it was due: customers write, the post
+delivers, payments land.
+
+It takes a few real seconds. Meanwhile the page is covered, nothing can be
+done, and the clock in the bar steps through the night. A paused world can be
+forwarded too, and arrives paused. Nothing happens at 17:00: keep playing and
+you are working late.
+
+`game_run` does the forwarding, so the button is refused on a world nothing is
+ticking. Stop the loop mid-forward and the world waits, frozen, until the next
+`game_run` carries on. How it works, and why it replays the night rather than
+jumping: [DESIGN.md](DESIGN.md) §3.4.
+
 ---
 
 ## Stopping
@@ -331,7 +354,7 @@ from ticks arriving, not from anything the process promises on its way out.
 psql -d mygame -tAc "SET search_path=public,pg_catalog; SELECT now()"
 
 # the raw clock
-psql -d mygame -c "SELECT game_now, last_tick_real, rate, paused, max_gap FROM game_clock"
+psql -d mygame -c "SELECT game_now, last_tick_real, rate, paused, max_gap, forward_to FROM game_clock"
 
 # is it actually running? (a large gap means nothing is ticking it)
 psql -d mygame -tAc "SELECT pg_catalog.now() - last_tick_real AS since_last_tick FROM game_clock"

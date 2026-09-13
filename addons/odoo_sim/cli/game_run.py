@@ -68,6 +68,11 @@ class GameRun(Command):
         if error := loop.unsupported_workers_error(odoo.tools.config['workers']):
             sys.exit(error)
 
+        # A world created before this code knows nothing of forwarding.
+        with odoo.sql_db.db_connect(dbname).cursor() as cr:
+            game_clock.upgrade(cr)
+            cr.commit()
+
         clock = game_clock.clock_for(dbname)
         if clock is None:
             sys.exit(
@@ -102,6 +107,11 @@ class GameRun(Command):
             "PAUSED" if clock.paused
             else f"freezing after {clock.max_gap.total_seconds()}s without a tick",
         )
+        if clock.forwarding:
+            _logger.warning(
+                "the world was stopped while forwarding to %s; it will carry on "
+                "from %s", clock.forward_to, clock.game_now,
+            )
         if clock.paused:
             _logger.warning(
                 "the world is paused; time will not move until "

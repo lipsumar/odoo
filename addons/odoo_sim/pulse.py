@@ -73,6 +73,10 @@ def payload(clock: GameClock, real: datetime | None = None) -> dict:
     microseconds happen to be zero, so roughly one tick in a million
     serialises as ``"2026-09-09T12:00:00"``.  Valid ISO; parses fine; breaks
     anything that pattern-matches the shape instead of parsing it.
+
+    ``forward_to`` is the game instant the world is forwarding to, in the same
+    format, or ``None``.  While it is set the world is not ``running``, and
+    ``game_now`` moves in steps from one due event to the next (DESIGN.md 3.4).
     """
     return {
         'game_now': clock.game_now.isoformat(),
@@ -82,6 +86,7 @@ def payload(clock: GameClock, real: datetime | None = None) -> dict:
         'max_gap': clock.max_gap.total_seconds(),
         'running': game_clock.is_running(clock, real),
         'server_real_now': (real if real is not None else datetime.now()).isoformat(),
+        'forward_to': clock.forward_to.isoformat() if clock.forwarding else None,
     }
 
 

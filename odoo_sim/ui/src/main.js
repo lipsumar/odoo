@@ -31,11 +31,20 @@ const state = {
 
 const game = document.getElementById('game');
 const clockRoot = document.createElement('header');
+clockRoot.className = 'timebar-root';
 const worldRoot = document.createElement('main');
 const mailRoot = document.createElement('div');
-game.replaceChildren(clockRoot, worldRoot, mailRoot);
+const veilRoot = document.createElement('div');
+game.replaceChildren(clockRoot, worldRoot, mailRoot, veilRoot);
 
-const renderClock = createView(clockRoot);
+const renderClock = createView(clockRoot, veilRoot, {
+    pause: (paused) => moveTime('clock:pause', '/game/api/clock/pause', { paused }),
+    forward: () => moveTime('clock:forward', '/game/api/clock/forward', {
+        // The page shows time in the browser's zone, so the morning it lands
+        // on is nine o'clock as this page shows it.
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+});
 const renderWorld = createWorldView(worldRoot, {
     start: (stationId, { qty, productionId }) => perform(
         `station:${stationId}`,
@@ -90,6 +99,12 @@ function render() {
     renderClock(state);
     renderWorld(state);
     renderMail(state);
+    // Nothing on the page can be used while the world forwards: the server
+    // refuses it anyway, and a half-typed form would be answered by a
+    // different day.  `inert` takes the focus away too, not just the mouse.
+    const forwarding = Boolean(state.reading?.forwardTo);
+    worldRoot.inert = forwarding;
+    mailRoot.inert = forwarding;
 }
 
 function send(method, url, body) {
@@ -115,6 +130,25 @@ async function perform(key, request) {
     render();
     try {
         await sync.act(request);
+    } catch (error) {
+        state.error = error.message;
+    } finally {
+        state.pending.delete(key);
+        render();
+    }
+}
+
+/**
+ * Pause, resume or forward.  The answer is a clock reading, in the pulse's own
+ * shape, so the bar changes at once; the pulse the server sends with it tells
+ * every other page.
+ */
+async function moveTime(key, url, body) {
+    state.pending.add(key);
+    state.error = null;
+    render();
+    try {
+        state.reading = readClock(await readWorld(await send('POST', url, body)));
     } catch (error) {
         state.error = error.message;
     } finally {

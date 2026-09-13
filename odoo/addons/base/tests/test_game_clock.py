@@ -50,9 +50,9 @@ def resolved_dbname():
 
 
 def a_clock(game_now=GAME_START, rate=60, *, last_tick=ANCHOR_REAL,
-            paused=False, max_gap=NO_CLAMP):
+            paused=False, max_gap=NO_CLAMP, forward_to=None):
     """ A clock reading, with the staleness clamp off unless asked for. """
-    return GameClock(game_now, last_tick, rate, paused, max_gap)
+    return GameClock(game_now, last_tick, rate, paused, max_gap, forward_to)
 
 
 class TestGameClockMath(BaseCase):
@@ -183,6 +183,31 @@ class TestGameClockMath(BaseCase):
                 game_clock.is_running(None),
                 "an ordinary Odoo database has no loop to stop",
             )
+
+    def test_a_forwarding_world_stands_still_and_is_not_running(self):
+        """ DESIGN.md 3.4: the loop moves a forwarding world, readers do not. """
+        clock = a_clock(GAME_START, 1440, max_gap=timedelta(seconds=5),
+                        forward_to=GAME_START + timedelta(hours=16))
+        with freeze_time(ANCHOR_REAL) as frozen:
+            frozen.tick(timedelta(seconds=3))
+            self.assertEqual(clock.now(), GAME_START)
+            self.assertFalse(game_clock.is_running(clock), "nothing can be done meanwhile")
+            self.assertTrue(game_clock.is_ticking(clock), "a loop is there to move it")
+            frozen.tick(timedelta(seconds=3))
+            self.assertFalse(game_clock.is_ticking(clock))
+
+    def test_an_older_reading_never_replaces_a_newer_one(self):
+        """ A request reading through an old snapshot must not set this
+        process's clock back: the jobs a forward runs at 23:00 would stamp
+        their records with the step before.
+        """
+        dbname = 'odoo_sim_readings'
+        self.addCleanup(game_clock.invalidate, dbname)
+        newer = a_clock(GAME_START + timedelta(hours=7), last_tick=ANCHOR_REAL + timedelta(seconds=1))
+        older = a_clock(GAME_START, last_tick=ANCHOR_REAL)
+        game_clock._remember(dbname, newer)
+        self.assertIs(game_clock._remember(dbname, older), older, "its reader still gets its own snapshot")
+        self.assertIs(game_clock.clock_for(dbname), newer)
 
     def test_field_helpers_follow_the_clock(self):
         """ The four business-time entry points of fields_temporal. """
@@ -350,6 +375,68 @@ class TestGameClockDatabase(TransactionCase):
             resumed = game_clock.set_paused(self.env.cr, False)
             self.assertFalse(resumed.paused)
             self.assertEqual(resumed.game_now, paused.game_now)
+
+    def test_sql_and_python_agree_when_forwarding(self):
+        """ Raw SQL stands still while forwarding, as Python does. """
+        with installed_game_world(self.env.cr, rate=1440) as clock:
+            forwarding = game_clock.start_forward(self.env.cr, clock.game_now + timedelta(hours=16))
+            self.assertTrue(forwarding.forwarding)
+            sql_real, sql_game = self._sql_now()
+            self.assertEqual(sql_game, forwarding.game_now)
+            self.assertEqual(forwarding.game_at(sql_real + timedelta(hours=1)), forwarding.game_now)
+
+    def test_a_forward_moves_when_stepped_and_only_then(self):
+        with installed_game_world(self.env.cr, rate=1440) as clock:
+            target = clock.game_now + timedelta(hours=16)
+            game_clock.start_forward(self.env.cr, target)
+
+            # the loop's clock thread keeps ticking meanwhile, and must not move it
+            self.env.cr.execute("""
+                UPDATE public.game_clock
+                   SET last_tick_real = pg_catalog.now() - INTERVAL '2 seconds'
+            """)
+            ticked = game_clock.tick(self.env.cr)
+            self.assertEqual(ticked.game_now, clock.game_now)
+            self.assertEqual(ticked.forward_to, target)
+
+            later = clock.game_now + timedelta(hours=7)
+            self.assertEqual(game_clock.step_forward(self.env.cr, later).game_now, later)
+            self.assertEqual(game_clock.step_forward(self.env.cr, clock.game_now).game_now, later,
+                             "never back")
+            self.assertEqual(game_clock.step_forward(self.env.cr, target + timedelta(days=1)).game_now,
+                             target, "never past the target")
+
+            finished = game_clock.finish_forward(self.env.cr)
+            self.assertEqual(finished.game_now, target)
+            self.assertFalse(finished.forwarding)
+            self.assertIsNone(game_clock.finish_forward(self.env.cr), "nothing left to finish")
+            self.assertIsNone(game_clock.step_forward(self.env.cr, target))
+
+    def test_a_world_forwards_once_at_a_time(self):
+        with installed_game_world(self.env.cr) as clock:
+            target = clock.game_now + timedelta(hours=16)
+            self.assertIsNotNone(game_clock.start_forward(self.env.cr, target))
+            self.assertIsNone(game_clock.start_forward(self.env.cr, target + timedelta(days=1)))
+            self.assertEqual(game_clock.read(self.env.cr).forward_to, target)
+
+    def test_a_paused_world_arrives_paused(self):
+        with installed_game_world(self.env.cr) as clock:
+            game_clock.set_paused(self.env.cr, True)
+            game_clock.start_forward(self.env.cr, clock.game_now + timedelta(hours=16))
+            self.assertTrue(game_clock.finish_forward(self.env.cr).paused)
+
+    def test_a_world_from_before_forwarding_is_read_then_upgraded(self):
+        """ Its clock is read by every cursor before anything can upgrade it. """
+        with installed_game_world(self.env.cr) as clock:
+            self.env.cr.execute("ALTER TABLE public.game_clock DROP COLUMN forward_to")
+            old = game_clock.read(self.env.cr)
+            self.assertEqual(old.game_now, clock.game_now)
+            self.assertFalse(old.forwarding)
+
+            game_clock.upgrade(self.env.cr)
+            game_clock.start_forward(self.env.cr, clock.game_now + timedelta(hours=1))
+            _sql_real, sql_game = self._sql_now()
+            self.assertEqual(sql_game, clock.game_now, "the regenerated now() stands still")
 
     def test_records_follow_game_time(self):
         """ create_date and write_date carry game time, not real time. """

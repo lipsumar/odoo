@@ -17,9 +17,10 @@ import werkzeug.exceptions
 
 from odoo import game_clock, http
 from odoo.addons.bus.websocket import WebsocketConnectionHandler
-from odoo.addons.odoo_sim import pulse
+from odoo.addons.odoo_sim import pulse, workday
 from odoo.addons.odoo_sim.controllers.world import _world
 from odoo.addons.odoo_sim.models.game_world import CHANGED
+from odoo.exceptions import UserError
 from odoo.http import request
 from odoo.tools import file_open
 
@@ -157,3 +158,65 @@ class GameUi(http.Controller):
         basis must not have.
         """
         return pulse.payload(_world_clock())
+
+    @http.route('/game/api/clock/pause', type='json2', auth='user', methods=['POST'])
+    def pause(self, paused=True):
+        """ Pause the world (``paused``), or resume it.
+
+        Allowed whether or not a loop is ticking: the flag takes effect for
+        every reader at once, loop or no loop.  Answers with the new reading,
+        and tells every other page with a pulse of its own rather than leaving
+        them a tick behind.
+        """
+        env = _world().env
+        if not isinstance(paused, bool):
+            raise UserError(env._("Pausing is yes or no."))
+        cr = request.env.cr
+        if self._fresh_clock(cr).forwarding:
+            raise UserError(env._("The world is moving on to the next day: wait until it gets there."))
+        clock = game_clock.set_paused(cr, paused)
+        pulse.send(cr, clock)
+        return pulse.payload(clock)
+
+    @http.route('/game/api/clock/forward', type='json2', auth='user', methods=['POST'])
+    def forward(self, tz=None):
+        """ Send the world on to the next working morning (DESIGN.md 3.4).
+
+        The morning is :data:`workday.DAY_START` in ``tz``, the time zone the
+        page shows time in, falling back to the player's own.  The loop then
+        moves time there one due event at a time; until it arrives the world
+        is not running, so every action is refused.  A paused world stays
+        paused through it, and arrives paused.
+
+        Refused while nothing is ticking the world, since nothing would ever
+        carry it out and the world would stay frozen.
+        """
+        env = _world().env
+        cr = request.env.cr
+        clock = self._fresh_clock(cr)
+        if clock.forwarding:
+            raise UserError(env._("The world is already moving on to the next day."))
+        if not game_clock.is_ticking(clock):
+            raise UserError(env._("Nothing is ticking this world, so it cannot move on to the next day."))
+        target = workday.next_day_start(
+            clock.now(), workday.timezone(tz if isinstance(tz, str) else None, request.env.user.tz),
+        )
+        clock = game_clock.start_forward(cr, target)
+        if clock is None:  # another page got there first
+            raise UserError(env._("The world is already moving on to the next day."))
+        pulse.send(cr, clock)
+        # Wake the loop's cron thread now rather than at its next poll.
+        cr.postcommit.add(request.env['ir.cron']._notifydb)
+        return pulse.payload(clock)
+
+    @staticmethod
+    def _fresh_clock(cr):
+        """ Read this world's clock afresh, or refuse if there is no world.
+
+        Fresh, not :func:`_world_clock`'s cached reading: a forward another
+        page started a moment ago must be seen.
+        """
+        clock = game_clock.read(cr)
+        if clock is None:
+            raise werkzeug.exceptions.NotFound(f"{request.db} is not a game world.")
+        return clock

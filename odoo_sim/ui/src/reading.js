@@ -51,5 +51,9 @@ export function readClock(payload) {
         // Evaluated by the server, so that what this page says about the world
         // and what a write path refuses cannot drift apart.
         running: payload.running === true,
+        // Where the world is being forwarded to, or null.  While it is set the
+        // world is not running, and `gameNow` jumps from one due event to the
+        // next (DESIGN.md 3.4).
+        forwardTo: payload.forward_to ? parseInstant(payload.forward_to) : null,
     };
 }

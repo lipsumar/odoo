@@ -30,7 +30,10 @@ def _world():
 def _acting():
     """ Return the world for an action, or refuse if time is not moving. """
     world = _world()
-    if not game_clock.is_running(game_clock.clock_for(request.db, request.env.cr)):
+    clock = game_clock.clock_for(request.db, request.env.cr)
+    if clock is not None and clock.forwarding:
+        raise UserError(world.env._("The world is moving on to the next day: nothing can be done until it gets there."))
+    if not game_clock.is_running(clock):
         raise UserError(world.env._("The world is not running: nothing can happen until time moves again."))
     return world
 

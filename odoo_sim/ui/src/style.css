@@ -34,43 +34,93 @@ body {
     color: var(--ink);
 }
 
-#game {
+#game > main {
     max-width: 60rem;
     margin: 0 auto;
     padding-inline: 1rem;
-    padding-block: 2rem 4rem;
+    padding-block: 1.5rem 4rem;
 }
 
-.clock {
-    text-align: center;
+/* -- the time bar ------------------------------------------------------- */
+
+/* Above the mail drawer (20) and the forwarding veil (25), which it stays
+   visible over: the clock racing through the night is the progress bar. */
+.timebar-root {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+}
+
+.timebar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 0.5rem 1rem;
+}
+
+.timebar-clock {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 0.75rem;
 }
 
 .clock-time {
-    display: block;
-    font-size: clamp(2.5rem, 10vw, 4.5rem);
-    font-weight: 300;
+    font-size: 1.5rem;
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
-}
-
-.clock-date {
-    margin: 0.25rem 0 0;
-    font-size: 1.25rem;
+    line-height: 1.2;
 }
 
 .clock-world {
-    margin: 0.5rem 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.timebar[data-state="paused"] .clock-time,
+.timebar[data-state="stopped"] .clock-time {
     color: var(--muted);
 }
 
-.clock[data-state="paused"] .clock-time,
-.clock[data-state="stopped"] .clock-time {
-    color: var(--muted);
+.timebar[data-state="forwarding"] .clock-world {
+    color: var(--wait);
+}
+
+.timebar-actions {
+    display: flex;
+    gap: 0.5rem;
 }
 
 .clock-link {
-    margin: 0.5rem 0 0;
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.forwarding-veil {
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: color-mix(in srgb, var(--ground) 75%, transparent);
+    cursor: progress;
+}
+
+.forwarding-veil p {
+    margin: 0;
+    padding: 1rem 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.16);
 }
 
 .clock-link[data-tone="wait"] {
@@ -96,7 +146,6 @@ body {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
     gap: 1rem;
-    margin-top: 2rem;
 }
 
 .panel {

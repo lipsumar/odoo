@@ -9,11 +9,13 @@ import threading
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytz
+
 from odoo import game_clock
 from odoo.addons.base.models.ir_cron import IrCron
-from odoo.addons.odoo_sim import loop
+from odoo.addons.odoo_sim import loop, workday
 from odoo.game_clock import GameClock
-from odoo.tests.common import TransactionCase
+from odoo.tests.common import BaseCase, TransactionCase
 from odoo.tools import config
 
 _MISSING = object()
@@ -176,3 +178,121 @@ class TestCronTickBookkeeping(TransactionCase):
         self.assertEqual(
             getattr(threading.current_thread(), 'dbname', None), self.env.cr.dbname)
         self.assertIsNone(threading.current_thread().start_time)
+
+
+class TestNextWorkingDay(BaseCase):
+    """Where a forward lands: nine in the morning, in the player's zone."""
+
+    brussels = workday.timezone('Europe/Brussels')
+
+    def test_from_the_evening_it_is_tomorrow_morning(self):
+        # 17:30 in Brussels, which is UTC+1 in March
+        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 16, 30), self.brussels),
+                         datetime(2030, 3, 2, 8, 0))
+
+    def test_from_the_small_hours_it_is_the_same_morning(self):
+        """ Two in the morning is still the night being skipped. """
+        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 1, 0), self.brussels),
+                         datetime(2030, 3, 1, 8, 0))
+
+    def test_at_nine_sharp_it_is_the_next_day(self):
+        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 8, 0), self.brussels),
+                         datetime(2030, 3, 2, 8, 0))
+
+    def test_across_a_change_of_clocks(self):
+        """ Nine is nine on the morning summer time starts: an hour earlier in UTC. """
+        self.assertEqual(workday.next_day_start(datetime(2030, 3, 30, 17, 0), self.brussels),
+                         datetime(2030, 3, 31, 7, 0))
+
+    def test_the_first_zone_that_exists_wins(self):
+        self.assertEqual(workday.timezone('Mars/Olympus_Mons', 'Europe/Brussels').zone, 'Europe/Brussels')
+        self.assertIs(workday.timezone(None, False, ''), pytz.utc)
+
+
+class TestForward(TransactionCase):
+    """A forward moves the world from one due event to the next (DESIGN.md 3.4).
+
+    The loop's own cursor and cron runner are swapped for this transaction's,
+    through registry test mode, so jobs run here and roll back with the test.
+    The world's other crons are switched off: only this test's may run.
+    """
+
+    START = datetime(2030, 3, 1, 16, 0)
+    TARGET = datetime(2030, 3, 2, 8, 0)
+
+    def setUp(self):
+        super().setUp()
+        cr = self.env.cr
+        self.env['ir.cron'].search([]).active = False
+        cr.execute("SET search_path = public, pg_catalog")
+        game_clock.install(cr, self.START, 60, timedelta(days=365))
+        self.addCleanup(game_clock.invalidate, cr.dbname)
+        # A job reads the clock through the cache; running out of time mid-test
+        # would send it to a connection that cannot see this transaction.
+        self.startPatcher(patch.object(game_clock, 'CACHE_TTL', 3600))
+        self.loop = loop.GameLoop(cr.dbname, 1.0, 1.0)
+
+    def cron(self, name, code=''):
+        """ A cron that only ever runs when triggered. """
+        return self.env['ir.cron'].create({
+            'name': f"forward test: {name}",
+            'state': 'code',
+            'code': code,
+            'model_id': self.env.ref('base.model_res_partner').id,
+            'user_id': self.env.uid,
+            'interval_number': 1,
+            'interval_type': 'days',
+            'nextcall': datetime(2100, 1, 1),
+        })
+
+    def process_jobs(self):
+        with self.registry.cursor() as cr:
+            IrCron._process_jobs_loop(cr, job_ids=[job['id'] for job in IrCron._get_all_ready_jobs(cr)])
+
+    def forward(self, process_jobs=None):
+        game_clock.start_forward(self.env.cr, self.TARGET)
+        self.env.flush_all()
+        with self.enter_registry_test_mode():
+            self.loop.run_forward(cursor=self.registry.cursor, process_jobs=process_jobs or self.process_jobs)
+        self.env.invalidate_all()
+
+    def partners(self, name):
+        return self.env['res.partner'].search([('name', '=', f"forward test: {name}")])
+
+    def test_everything_happens_when_it_was_due(self):
+        """ Including what an event sets off in turn, from *its* instant. """
+        later = self.cron('later', "env['res.partner'].create({'name': 'forward test: later'})")
+        evening = self.cron('evening', f"""
+partner = env['res.partner'].create({{'name': 'forward test: evening'}})
+env['ir.cron'].browse({later.id})._trigger(partner.create_date + datetime.timedelta(hours=2))
+""")
+        evening._trigger(datetime(2030, 3, 1, 23, 0))
+        tomorrow = self.cron('tomorrow', "env['res.partner'].create({'name': 'forward test: tomorrow'})")
+        tomorrow._trigger(self.TARGET + timedelta(hours=2))
+
+        self.forward()
+
+        self.assertEqual(self.partners('evening').create_date, datetime(2030, 3, 1, 23, 0))
+        self.assertEqual(self.partners('later').create_date, datetime(2030, 3, 2, 1, 0),
+                         "two hours after the evening job, not two hours after the morning")
+        self.assertFalse(self.partners('tomorrow'), "due after the morning: not yet")
+        clock = game_clock.read(self.env.cr)
+        self.assertEqual(clock.game_now, self.TARGET)
+        self.assertFalse(clock.forwarding, "time runs again")
+
+    def test_an_event_at_the_target_happens_before_time_runs_again(self):
+        self.cron('nine', "env['res.partner'].create({'name': 'forward test: nine'})")._trigger(self.TARGET)
+        self.forward()
+        self.assertEqual(self.partners('nine').create_date, self.TARGET)
+
+    def test_a_job_that_stays_ready_does_not_hold_the_world(self):
+        """ Jobs that never stop being ready are run a bounded number of times. """
+        self.cron('stuck')._trigger(self.START)
+        runs = []
+        with self.assertLogs(loop._logger.name, 'WARNING'):
+            self.forward(process_jobs=lambda: runs.append(1))
+        self.assertEqual(len(runs), loop.MAX_PASSES_PER_INSTANT)
+        self.assertEqual(game_clock.read(self.env.cr).game_now, self.TARGET)
+
+    def test_a_world_that_is_not_forwarding_takes_no_step(self):
+        self.assertIsNone(loop.forward_step(self.env.cr))

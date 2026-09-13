@@ -176,6 +176,77 @@ class TestGameUi(HttpCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn('sim_init', response.text, "say how to fix it")
 
+    # -- pausing and forwarding --------------------------------------------
+
+    #: 17:00 in Brussels, 01:00 the next day in Tokyo.
+    EVENING = datetime(2030, 3, 1, 16, 0)
+
+    def _installed_world(self, game_now=EVENING, max_gap=timedelta(days=365)):
+        """ A real clock row, in this test's transaction, for endpoints that
+        write it.  The clamp is off by default: the transaction, and so the
+        row's last tick, may be minutes old by the time a request reads it.
+        """
+        self.env.cr.execute("SET search_path = public, pg_catalog")
+        return game_clock.install(self.env.cr, game_now, 1.0, max_gap)
+
+    def post(self, url, body):
+        return self.url_open(url, json=body, method='POST')
+
+    def test_the_page_pauses_and_resumes_the_world(self):
+        self._installed_world()
+        paused = self.post('/game/api/clock/pause', {'paused': True})
+        self.assertEqual(paused.status_code, 200, paused.text)
+        self.assertTrue(paused.json()['paused'])
+        self.assertTrue(game_clock.read(self.env.cr).paused)
+
+        resumed = self.post('/game/api/clock/pause', {'paused': False})
+        self.assertFalse(resumed.json()['paused'])
+        self.assertFalse(game_clock.read(self.env.cr).paused)
+
+    def test_forwarding_goes_to_nine_the_next_morning(self):
+        self._installed_world()
+        response = self.post('/game/api/clock/forward', {'tz': 'Europe/Brussels'})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['forward_to'], '2030-03-02T08:00:00')
+        self.assertFalse(response.json()['running'])
+        self.assertEqual(game_clock.read(self.env.cr).forward_to, datetime(2030, 3, 2, 8, 0))
+
+    def test_without_a_zone_the_morning_is_the_players(self):
+        self._installed_world()
+        self.env.ref('base.user_admin').tz = 'Asia/Tokyo'
+        self.env.flush_all()
+        response = self.post('/game/api/clock/forward', {})
+        # 01:00 in Tokyo is still the night: the morning is eight hours on
+        self.assertEqual(response.json()['forward_to'], '2030-03-02T00:00:00')
+
+    def test_nothing_can_be_done_while_forwarding(self):
+        self._installed_world()
+        self.assertEqual(self.post('/game/api/clock/forward', {'tz': 'UTC'}).status_code, 200)
+
+        again = self.post('/game/api/clock/forward', {'tz': 'UTC'})
+        self.assertEqual(again.status_code, 422)
+        self.assertIn('already', again.json()['message'])
+        pause = self.post('/game/api/clock/pause', {'paused': True})
+        self.assertEqual(pause.status_code, 422)
+        self.assertFalse(game_clock.read(self.env.cr).paused)
+        act = self.post('/game/api/packages', {})
+        self.assertEqual(act.status_code, 422)
+        self.assertIn('next day', act.json()['message'])
+
+    def test_a_world_nobody_ticks_is_not_sent_forward(self):
+        """ Nothing would carry the forward out, and the world would stay frozen. """
+        self._installed_world(max_gap=timedelta(seconds=5))
+        self.env.cr.execute("""
+            UPDATE public.game_clock SET last_tick_real = pg_catalog.now() - INTERVAL '1 hour'
+        """)
+        game_clock.invalidate(self.dbname)
+        response = self.post('/game/api/clock/forward', {'tz': 'UTC'})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn('Nothing is ticking', response.json()['message'])
+        self.assertFalse(game_clock.read(self.env.cr).forwarding)
+
     # -- the page ----------------------------------------------------------
 
     def test_the_page_carries_a_basis_and_the_channel_names(self):

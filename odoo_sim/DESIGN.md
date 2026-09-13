@@ -366,6 +366,80 @@ above rather than fetched once. The client still never polls; it listens. When
 the pulse stops for `max_gap` the UI locks its controls rather than merely
 stopping its clock, for the reason in the previous section.
 
+### 3.4 Forwarding to the next day
+
+A business works by day. A clock that runs through the night makes the player
+sit through sixteen game hours in which nothing of theirs moves, and anything
+that only happens tomorrow — a delivery, a customer's next order — makes them
+wait for it. So the player can say they are done for the day and **forward**
+the world to the next working morning: 09:00, the first one strictly after
+now, in the time zone the page shows time in (`addons/odoo_sim/workday.py`).
+Nothing happens at 17:00. A player who keeps going is working late, and time
+runs on.
+
+**Decision: a forward replays the night event by event; it does not jump.**
+Everything a world does on its own is a cron (`GAME_STATE.md` §9), so the next
+thing to happen is the next instant a cron becomes ready: the earliest
+`nextcall` or trigger `call_at` of an active cron, which is
+`_get_ready_sql_condition` read as a time rather than a test. The loop sets
+game time to that instant, runs what is ready there, again while running it
+makes more ready (a customer's email wakes the post office), then moves to the
+next instant, until nothing is due before the target. Then it puts the world at
+the target.
+
+Jumping straight to the target would be one `UPDATE`, and wrong twice over.
+Every email of the night would be dated 09:00. And chains would collapse: an
+event at 23:00 that schedules another two hours on schedules it for 01:00, but
+run at 09:00 it would schedule it for 11:00, out of the night altogether. The
+replay is also *more* exact than normal running: each event happens at its
+instant, not up to a cron tick late.
+
+The row gets one column, `forward_to timestamptz`, NULL unless forwarding.
+While it is set:
+
+- **readers stand still**, as when paused: `public.now()` and
+  `GameClock.game_at` return `game_now`, so every job at a step sees exactly
+  that step's instant;
+- **`is_running` is false**, so every action is refused, which is what "the
+  player cannot do anything meanwhile" means on the server. The page also veils
+  itself (`UI_DESIGN.md` §5.6);
+- **the clock thread's tick writes nothing** (`WHERE forward_to IS NULL`): the
+  steps are the only writes, so they never fight a tick for the row. It still
+  pulses, and the pulse carries `forward_to`, so a long forward and a dead loop
+  look different.
+
+**The cron thread forwards** (`GameLoop.run_forward`, one `forward_step` per
+transaction). It is the thread that is allowed to run jobs, and the clock
+thread must stay free to pulse. Each step commits before its jobs run, since
+they run in transactions of their own.
+
+Details that matter:
+
+- **The cache must not go back.** Jobs read the clock through the process
+  cache, and so does every request. A request whose snapshot predates a step
+  would cache the step before, and a job at 23:00 would stamp its records with
+  it. So `_remember` keeps the reading with the later `last_tick_real`, which
+  every write to the row sets to its transaction's instant. That also closes an
+  older hole: a stale unpaused reading cached just after a pause.
+- **Passes are bounded.** A job that stays ready whatever it does (reporting
+  remaining work forever, or stopped by a module state) is run
+  `MAX_PASSES_PER_INSTANT` times, and the forward moves on without it.
+- **A paused world can be forwarded**, and arrives paused.
+- **A forward needs a loop.** It is refused when nothing ticks the world
+  (`is_ticking`, which is `is_running` without the pause), since nothing would
+  ever carry it out.
+- **A crash mid-forward** leaves `forward_to` set and the world frozen at the
+  last step. The next `game_run` carries on from there.
+- **Worlds from before forwarding** get the column from `game_clock.upgrade`,
+  run by `game_run` at startup and by `install`. Until then `_read` selects
+  `NULL` for it, because the read runs inside other transactions and an error
+  would abort them.
+- **Interval crons run at every occurrence** during a forward, since the
+  forward steps onto each `nextcall`. §5.2's collapse does not apply. It costs
+  one step a game hour for Odoo's hourly crons.
+- **Not guarded:** another Odoo server pointed at the world, as with pausing
+  (`GAME_STATE.md` §10). Weekends are not modelled.
+
 ## 4. Design
 
 ### 4.1 PostgreSQL
@@ -751,6 +825,12 @@ proves too costly.
    world's game instant across unless `--game-start` overrides it, so changing
    the rate between runs no longer rewinds the world.
 
+9. **Done.** §3.4's forward: `forward_to` and its primitives
+   (`start_forward`, `step_forward`, `finish_forward`, `is_ticking`,
+   `upgrade`) in `game_clock.py`, the stepping in `loop.py`, the day in
+   `workday.py`, and the pause and forward endpoints behind the page's time
+   bar.
+
 With 3, 7 and 8 built, what remains is 4 (§5.3's deactivation threshold) and
 5 and 6, all driven by observed behaviour rather than worth doing
 speculatively — now widened by §5.12, which says what shape to look for.
@@ -810,6 +890,17 @@ game world, for the reason in the last bullet below.
   and above all **that a paused world keeps pulsing**. That last one is the
   property the UI's lock rests on, and precisely what a plausible "only send on
   change" optimisation would delete, so it is a test and not only a comment.
+- Forwarding (§3.4): in `TestGameClockMath`, that a forwarding clock stands
+  still, is not running and is still ticking, and that an older reading never
+  replaces a newer one in the cache; in `TestGameClockDatabase`, that SQL
+  stands still too, that only a step moves it (never back, never past the
+  target), once at a time, that a pause survives it, and that a world from
+  before forwarding is read and then upgraded. In `addons/odoo_sim/tests/`,
+  `TestForward` runs a whole night through the loop in the test's
+  transaction: an event at 23:00 happens at 23:00, the one it schedules two
+  hours on at 01:00, one due after the morning does not happen, and a job that
+  stays ready does not hold the world. `TestNextWorkingDay` covers the
+  morning; `TestGameUi`, the endpoints.
 - `TestTickHeadroom`, `TestRetentionWarning`, `TestCronTickBookkeeping` — the
   loop's arithmetic and, most importantly, that a cron tick puts back the
   `thread.dbname` that `_process_jobs` deleted (§5.8).
@@ -864,6 +955,8 @@ Resolved during design review:
 | Game loop: a thread in the server, or its own process? | **Its own process** — `odoo-bin game_run`, hosted in the game addon so the upstream diff stays at zero (§4.3). |
 | Does that process also serve the UI? | **Yes**, over Odoo's own dispatcher. The UI shows game state and takes player actions; it is a client of the loop, not a driver of its design. |
 | Can a world be paused? | **Yes** (§3.3), reversing part of §3.1. Explicitly via a `paused` flag, and implicitly via a staleness clamp so a killed process or a sleeping laptop freezes the world instead of ageing it. |
+| Can the player skip the night? | **Yes**: forward to the next 09:00 (§3.4). Nothing happens at 17:00; working late is allowed. |
+| Does a forward jump, or replay? | **Replay**, one due cron instant at a time, in the loop's cron thread, with readers frozen meanwhile (§3.4). |
 
 Note that with rate changes gone, the question of a rate changing mid-request
 disappears. `cr.now()` remains cached per transaction (`odoo/sql_db.py:271`),

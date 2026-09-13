@@ -78,7 +78,7 @@ class TestWorldPulse(TransactionCase):
         self.assertEqual(
             set(sent),
             {'game_now', 'last_tick_real', 'rate', 'paused', 'max_gap',
-             'running', 'server_real_now'},
+             'running', 'server_real_now', 'forward_to'},
         )
         # replaying the server's own arithmetic from the payload alone
         basis = GameClock(
@@ -116,6 +116,16 @@ class TestWorldPulse(TransactionCase):
             datetime.fromisoformat(pulse.payload(precise)['last_tick_real']).microsecond,
             123456,
         )
+
+    def test_a_forwarding_world_says_where_it_is_going(self):
+        """ And is not running, so the page locks itself until it gets there. """
+        target = GAME_START + timedelta(hours=16)
+        clock = GameClock(GAME_START, ANCHOR_REAL, 1440, False, timedelta(seconds=5), target)
+        sent = pulse.payload(clock, real=ANCHOR_REAL + timedelta(seconds=1))
+        self.assertEqual(sent['forward_to'], target.isoformat())
+        self.assertFalse(sent['running'])
+        self.assertFalse(sent['paused'], "forwarding is not pausing")
+        self.assertIsNone(pulse.payload(self._a_clock())['forward_to'])
 
     def test_no_pulse_without_a_clock(self):
         """ Not a game world, nothing to say. """

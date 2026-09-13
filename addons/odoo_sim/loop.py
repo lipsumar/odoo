@@ -22,7 +22,7 @@ import select
 import threading
 import time
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import odoo.sql_db
 from odoo import game_clock
@@ -36,6 +36,70 @@ MIN_GAP_TO_TICK_RATIO = 2
 
 #: Below this much *real* replay, warn that the bus backlog is uselessly short.
 MIN_USEFUL_RETENTION = timedelta(hours=1)
+
+#: How many times a forward runs the jobs ready at one instant before moving
+#: on.  Jobs make each other ready -- a customer's email wakes the post office
+#: -- so once is not enough; a job that stays ready whatever it does (one
+#: reporting remaining work forever, a module state that stops every job) must
+#: not hold the world at one instant for good.
+MAX_PASSES_PER_INSTANT = 10
+
+#: The earliest instant after ``%(after)s`` at which a cron becomes ready: the
+#: two halves of ``IrCron._get_ready_sql_condition``, as a time rather than a
+#: test.
+_NEXT_DUE = """
+    SELECT LEAST(
+        (SELECT MIN(nextcall) FROM ir_cron WHERE active AND nextcall > %(after)s),
+        (SELECT MIN(trigger.call_at)
+           FROM ir_cron_trigger trigger
+           JOIN ir_cron cron ON cron.id = trigger.cron_id
+          WHERE cron.active AND trigger.call_at > %(after)s)
+    )
+"""
+
+
+def next_due(cr, after: datetime = datetime.min) -> datetime | None:
+    """ Return when the next cron on ``cr``'s database becomes ready, strictly
+    after the game instant ``after``, or ``None`` if none ever will.
+
+    Everything a world does on its own is a cron: the settle at each run's end,
+    each arrival and each payment, customers placing orders, the post office.
+    So this is the next instant anything at all happens.
+    """
+    cr.execute(_NEXT_DUE, {'after': after})
+    return cr.fetchone()[0]
+
+
+def forward_step(cr, skip_ready: bool = False) -> str | None:
+    """ Take one step of the forward ``cr``'s world is on, and say what it was.
+
+    - ``'process'``: crons are ready at the instant the world is at, and must
+      run before it moves on.  Nothing was written.
+    - ``'stepped'``: game time moved to the next instant a cron is due.
+    - ``'finished'``: nothing more is due before the target, so the world was
+      put there and time runs again.
+    - ``None``: the world is not forwarding.
+
+    ``skip_ready`` moves on even though crons are still ready: the caller has
+    run them :data:`MAX_PASSES_PER_INSTANT` times and they are stuck.
+
+    The caller commits: each step must be visible to the jobs run at it, which
+    run in transactions of their own.
+    """
+    clock = game_clock.read(cr)
+    if clock is None or not clock.forwarding:
+        return None
+    due = next_due(cr)
+    if due is not None and due <= clock.game_now:
+        if not skip_ready:
+            return 'process'
+        _logger.warning("forward: crons still ready at %s, moving on without them", clock.game_now)
+        due = next_due(cr, clock.game_now)
+    if due is None or due > clock.forward_to:
+        game_clock.finish_forward(cr)
+        return 'finished'
+    game_clock.step_forward(cr, due)
+    return 'stepped'
 
 
 def tick_headroom_error(clock_tick: float, max_gap: timedelta) -> str | None:
@@ -158,6 +222,56 @@ class GameLoop:
         thread.start_time = None
         thread.dbname = self.dbname
 
+    def run_tick(self) -> None:
+        """One poll of the cron thread: carry out a forward if one was asked
+        for, then run whatever is ready."""
+        clock = game_clock.clock_for(self.dbname)
+        if clock is not None and clock.forwarding:
+            self.run_forward()
+        self.run_cron_tick()
+
+    def run_forward(self, cursor=None, process_jobs=None) -> None:
+        """Move a forwarding world to its target, one due event at a time.
+
+        Game time jumps to the next instant a cron is due, the jobs ready
+        there run -- again, while running them makes more ready -- and so on
+        until nothing is due before the target.  So everything happens at the
+        instant it was due, and what it sets off in turn happens at *its*
+        instant: a payment at 20:55 that schedules a complaint for three days
+        later schedules it from 20:55, not from the morning.  Jumping straight
+        to the target instead would collapse every such chain into the
+        morning, and stamp every email of the night 09:00.
+
+        Runs in the cron thread because it *is* cron work, and must not share
+        a thread with the clock: the clock thread keeps pulsing throughout, so
+        a page can tell a long forward from a dead loop.  Stopping midway
+        leaves the world forwarding, frozen at the last step, and the next
+        loop to start carries on from there.
+
+        ``cursor`` and ``process_jobs`` stand in for a database connection and
+        :meth:`run_cron_tick` in tests.
+        """
+        cursor = cursor or odoo.sql_db.db_connect(self.dbname).cursor
+        process_jobs = process_jobs or self.run_cron_tick
+        started, steps, passes = time.monotonic(), 0, 0
+        _logger.info("forward: %s is moving on to %s", self.dbname,
+                     game_clock.clock_for(self.dbname).forward_to)
+        while not self._stop.is_set():
+            with cursor() as cr:
+                action = forward_step(cr, skip_ready=passes >= MAX_PASSES_PER_INSTANT)
+                cr.commit()
+            if action == 'process':
+                passes += 1
+                process_jobs()
+            elif action == 'stepped':
+                steps += 1
+                passes = 0
+            else:
+                if action == 'finished':
+                    _logger.info("forward: done in %s steps and %.1f real seconds",
+                                 steps, time.monotonic() - started)
+                return
+
     def run_cron_tick(self) -> None:
         """Run every ready job once, and put back what ``_process_jobs`` took.
 
@@ -216,4 +330,4 @@ class GameLoop:
                     return
                 raise
             pg_conn.notifies.clear()  # one world here, so there is nothing to filter
-            self.run_cron_tick()
+            self.run_tick()
