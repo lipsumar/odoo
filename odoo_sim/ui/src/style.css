@@ -38,7 +38,7 @@ body {
     max-width: 60rem;
     margin: 0 auto;
     padding-inline: 1rem;
-    padding-block: 2rem;
+    padding-block: 2rem 4rem;
 }
 
 .clock {
@@ -223,14 +223,6 @@ button:disabled {
     font-weight: 500;
 }
 
-/* -- mail --------------------------------------------------------------- */
-
-.mail {
-    margin-top: 1rem;
-}
-
-.mail-address {
-
 /* -- money and customers ------------------------------------------------ */
 
 .balance {
@@ -247,13 +239,107 @@ button:disabled {
     font-size: 0.9rem;
 }
 
+/* -- mail: a bottom drawer, dragged or clicked taller or shorter --------- */
+
+button.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--line);
+}
+
+.mail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 3.25rem;
+    max-height: 92vh;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    border-radius: 0.75rem 0.75rem 0 0;
+    box-shadow: 0 -0.5rem 1.5rem rgba(0, 0, 0, 0.16);
+    transition: height 0.2s ease;
+}
+
+.mail.dragging {
+    transition: none;
+}
+
+.mail-handle {
+    position: relative;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    width: 100%;
+    height: 3.25rem;
+    padding: 0 1rem;
+    background: transparent;
+    color: var(--ink);
+    border: 0;
+    border-radius: 0.75rem 0.75rem 0 0;
+    cursor: grab;
+    touch-action: none;
+}
+
+.mail-handle:active {
+    cursor: grabbing;
+}
+
+.mail-grip {
+    position: absolute;
+    top: 0.4rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2.5rem;
+    height: 0.25rem;
+    border-radius: 999px;
+    background: var(--line);
+}
+
+.mail-title {
+    font-weight: 600;
+}
+
+.mail-badge {
+    min-width: 1.25rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--surface);
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    text-align: center;
+}
+
+.mail-badge:empty {
+    display: none;
+}
+
+.mail-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 1rem 1rem;
+}
+
+.mail-address {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
 .mail-bar {
     display: flex;
     flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     gap: 0.5rem;
-    margin: 0.75rem 0;
+    margin: 0.25rem 0 0.75rem;
 }
 
 .mail-folders {
@@ -261,7 +347,6 @@ button:disabled {
     gap: 0.25rem;
 }
 
-button.secondary,
 .mail-folder {
     background: transparent;
     color: var(--accent);
@@ -272,13 +357,6 @@ button.secondary,
     background: var(--accent);
     color: var(--surface);
     border-color: var(--accent);
-}
-
-.mail-columns {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-    gap: 1rem;
-    align-items: start;
 }
 
 .mail-list {
@@ -337,10 +415,19 @@ button.secondary,
     font-weight: 600;
 }
 
-.mail-pane {
-    display: grid;
-    gap: 1rem;
+.mail-open-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.mail-open-header h3 {
+    margin: 0;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .mail-headers {
@@ -362,7 +449,7 @@ button.secondary,
 
 .mail-content {
     width: 100%;
-    height: 22rem;
+    height: 18rem;
     border: 1px solid var(--line);
     border-radius: 0.35rem;
     background: #fff;
@@ -403,7 +490,7 @@ button.secondary,
 }
 
 .mail-error {
-    margin: 0;
+    margin: 0 0 0.5rem;
     color: var(--fault);
 }
 

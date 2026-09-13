@@ -183,11 +183,25 @@ the mail.
   …`) rather than silently dropped. A player with no email address is told
   why nothing arrives, and cannot write.
 
-The page (`ui/src/mailView.js`): Inbox (with the unread count) and Sent, one
-email open, and a form for a new email or a reply. As elsewhere, `describeMail`
-is pure and tested, and the DOM is updated in place. The form's fields are
-filled once per form, because the page re-renders on every pulse and the
-fields hold what the player is typing.
+The page (`ui/src/mailView.js`): a bottom drawer, dragged or clicked taller or
+shorter like a real mail app's, showing one of three things at a time — Inbox
+or Sent (with the unread count), one email open with a way back to the list,
+or a form for a new email or a reply — never more than one, so opening an
+email is a navigation, not a second column. As elsewhere, `describeMail` is
+pure and tested, and the DOM is updated in place. The form's fields are filled
+once per form, because the page re-renders on every pulse and the fields hold
+what the player is typing.
+
+**The inbox only ever shows addresses, never names.** `email_from` and
+`email_to` are stored and delivered exactly as any mail server would carry
+them — a display name and all — but the page strips the name before showing
+a header or a sender in the list. The world knows perfectly well that
+`carla@outside.example.com` is Carla Customer of Binder & Co.; the inbox is
+deliberately as ignorant of that as a real one, so that matching an address to
+a customer (in Sales, say) is the player's own work, not something the mail
+client does for them. Writing a new email is address-only for the same
+reason: the "To" field takes a bare address, with no contact picker and no Cc
+— a real inbox lets you address a stranger by nothing but their address.
 
 ## 8. Agents
 

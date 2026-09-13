@@ -44,12 +44,19 @@ test('nothing to show before the world, and so the mail, has arrived', () => {
 test('the inbox lists what came, saying how much is unread', () => {
     const shown = show();
 
+    assert.equal(shown.view, 'list');
+    assert.equal(shown.unread, 1);
     assert.deepEqual(shown.folders.map(({ label, current }) => [label, current]), [['Inbox (1)', true], ['Sent', false]]);
     assert.deepEqual(shown.items.map(({ who, subject, date, unread }) => [who, subject, date, unread]), [
-        ['Carla Customer <carla@outside.example.com>', 'Quote', '4 May 2031, 08:30', true],
-        ['Tensile Wire Supply <orders@tensile-wire.example.com>', '(no subject)', '3 May 2031, 17:00', false],
+        ['carla@outside.example.com', 'Quote', '4 May 2031, 08:30', true],
+        ['orders@tensile-wire.example.com', '(no subject)', '3 May 2031, 17:00', false],
     ]);
     assert.equal(shown.empty, null);
+});
+
+test('a sender is never named, only its address: matching one to a customer is the player\'s job', () => {
+    const shown = show();
+    assert.ok(!shown.items[0].who.includes('Carla'), 'the inbox must not give the customer away');
 });
 
 test('the sent folder says who each email went to', () => {
@@ -60,29 +67,35 @@ test('the sent folder says who each email went to', () => {
     assert.equal(show({ mailUi: { folder: 'sent' } }).empty, 'Nothing sent yet.');
 });
 
-test('an open email shows its headers, body and attachments', () => {
+test('an open email shows its headers, body and attachments, and its sender by address alone', () => {
     const shown = show({ mailUi: { open: opened } });
 
+    assert.equal(shown.view, 'open');
     assert.equal(shown.items[0].open, true);
     assert.equal(shown.open.subject, 'Quote');
     assert.deepEqual(shown.open.headers.map(([name]) => name), ['From', 'To', 'Date'], 'an empty Cc is left out');
+    assert.deepEqual(Object.fromEntries(shown.open.headers), {
+        From: 'carla@outside.example.com', To: 'player@example.com', Date: '4 May 2031, 08:30',
+    });
     assert.equal(shown.open.body, '<p>Can you send me a quote?</p>');
     assert.equal(shown.open.attachments, 'Attached: specification.pdf');
     assert.equal(shown.open.canReply, true);
 });
 
-test('a reply is titled as one, and starts from what the server proposed', () => {
-    const compose = { key: 1, to: opened.reply.to, cc: '', subject: opened.reply.subject, parentId: 2 };
+test('a reply is titled as one, starts from what the server proposed, and its "to" is bare', () => {
+    const compose = { key: 1, to: opened.reply.to, subject: opened.reply.subject, parentId: 2 };
     const shown = show({ mailUi: { open: opened, compose } });
 
+    assert.equal(shown.view, 'compose');
     assert.equal(shown.compose.title, 'Reply');
+    assert.equal(shown.compose.to, 'carla@outside.example.com');
     assert.equal(shown.compose.subject, 'Re: Quote');
     assert.equal(shown.compose.canSend, true);
     assert.equal(show({ mailUi: { compose: { ...compose, parentId: null } } }).compose.title, 'New email');
 });
 
 test('nothing is sent while the world stands still, or while a send is in flight', () => {
-    const compose = { key: 1, to: 'carla@outside.example.com', cc: '', subject: 'Hi', parentId: null };
+    const compose = { key: 1, to: 'carla@outside.example.com', subject: 'Hi', parentId: null };
 
     const stopped = show({ mailUi: { compose }, reading: paused }).compose;
     assert.equal(stopped.canSend, false);

@@ -63,11 +63,11 @@ const renderMail = createMailView(mailRoot, {
     },
     write() {
         state.mailUi.open = null;
-        compose({ to: '', cc: '', subject: '', parentId: null });
+        compose({ to: '', subject: '', parentId: null });
     },
     reply() {
         const { open } = state.mailUi;
-        compose({ to: open.reply.to, cc: '', subject: open.reply.subject, parentId: open.id });
+        compose({ to: open.reply.to, subject: open.reply.subject, parentId: open.id });
     },
     send: (fields) => sendMail(fields),
     discard() {
