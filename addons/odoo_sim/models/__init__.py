@@ -11,3 +11,5 @@ from . import game_bank
 from . import account_bank_feed
 from . import game_customer
 from . import game_post
+from . import game_employee
+from . import stock_move

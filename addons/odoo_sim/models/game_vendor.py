@@ -127,17 +127,28 @@ class GameShipment(models.Model):
         self.ensure_one()
         # It may have arrived since the last settle.
         self.env['game.world']._settle()
+        self._at_the_door()
+        self._take_in()
+
+    def _at_the_door(self):
+        """ Lock the shipment, and refuse unless it is at the door for the taking. """
+        self.ensure_one()
         self.env.cr.execute(SQL("SELECT id FROM game_shipment WHERE id = %s FOR UPDATE", self.id))
         self.invalidate_recordset(['state'])
         if self.state == 'in_transit':
             raise UserError(self.env._("%s has not arrived yet.", self.display_name))
         if self.state == 'accepted':
             raise UserError(self.env._("%s has already been accepted.", self.display_name))
+        if worker := self.env['game.employee.task']._busy_with(shipment=self):
+            raise UserError(self.env._("%(employee)s is unpacking %(shipment)s.",
+                                       employee=worker.name, shipment=self.display_name))
 
+    def _take_in(self, at=None):
+        """ The contents are unpacked: they now exist in the world, as of ``at``. """
         stock = self.env['game.stock']
         for line in self.line_ids:
-            stock._apply(line.product_id, line.qty, 'received', shipment=self)
-        self.write({'state': 'accepted', 'date_accepted': fields.Datetime.now()})
+            stock._apply(line.product_id, line.qty, 'received', date=at, shipment=self)
+        self.write({'state': 'accepted', 'date_accepted': at or fields.Datetime.now()})
         self.env['game.world']._changed()
 
 

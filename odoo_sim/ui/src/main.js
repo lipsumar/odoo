@@ -67,6 +67,11 @@ const renderWorld = createWorldView(worldRoot, {
         `package:${packageId}`,
         () => send('POST', `/game/api/packages/${packageId}/send`, { address }),
     ),
+    hire: (jobId) => perform(
+        `job:${jobId}`,
+        // Nine to five as this page shows time, as for forwarding.
+        () => send('POST', `/game/api/jobs/${jobId}/hire`, { tz: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    ),
 });
 
 const renderMail = createMailView(mailRoot, {

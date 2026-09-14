@@ -17,3 +17,6 @@ access_game_package_debug,game.package debug,model_game_package,base.group_syste
 access_game_package_line_debug,game.package.line debug,model_game_package_line,base.group_system,1,0,0,0
 access_game_email_debug,game.email debug,model_game_email,base.group_system,1,0,0,0
 access_game_email_delivery_debug,game.email.delivery debug,model_game_email_delivery,base.group_system,1,0,0,0
+access_game_job_debug,game.job debug,model_game_job,base.group_system,1,0,0,0
+access_game_employee_debug,game.employee debug,model_game_employee,base.group_system,1,0,0,0
+access_game_employee_task_debug,game.employee.task debug,model_game_employee_task,base.group_system,1,0,0,0

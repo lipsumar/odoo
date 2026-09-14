@@ -19,6 +19,8 @@ from odoo import game_clock, http
 from odoo.exceptions import UserError
 from odoo.http import request
 
+from odoo.addons.odoo_sim import workday
+
 
 def _world():
     """ The world as the game sees it: privileged, after checking who is asking. """
@@ -76,6 +78,19 @@ class GameWorld(http.Controller):
         """ Accept a delivery at the door: its contents now exist. """
         world = _acting()
         _existing(world, 'game.shipment', shipment_id)._accept()
+        return world._snapshot(request.env.user)
+
+    @http.route('/game/api/jobs/<int:job_id>/hire', type='json2', auth='user', methods=['POST'])
+    def hire(self, job_id, tz=None):
+        """ Hire someone for a job, starting now.
+
+        Their working day is nine to five in ``tz``, the time zone the page
+        shows time in, falling back to the player's own.  They write to the
+        player who hired them.
+        """
+        world = _acting()
+        job = _existing(world, 'game.job', job_id)
+        job._hire(workday.timezone(tz if isinstance(tz, str) else None, request.env.user.tz), request.env.user)
         return world._snapshot(request.env.user)
 
     @http.route('/game/api/packages', type='json2', auth='user', methods=['POST'])

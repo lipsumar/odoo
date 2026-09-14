@@ -93,6 +93,9 @@ class GamePackage(models.Model):
             raise UserError(self.env._("%s has been unpacked.", self.display_name))
         if self.state != 'open':
             raise UserError(self.env._("%s has already been sent.", self.display_name))
+        if worker := self.env['game.employee.task']._busy_with(package=self):
+            raise UserError(self.env._("%(employee)s is packing %(package)s.",
+                                       employee=worker.name, package=self.display_name))
 
     def _pack(self, product, qty):
         """ Put ``qty`` of ``product``, in its own unit, in the box: it leaves the shelves. """
@@ -132,8 +135,11 @@ class GamePackage(models.Model):
             raise UserError(self.env._("Write an address on %s before sending it.", self.display_name))
         if not self.line_ids:
             raise UserError(self.env._("%s is empty: there is nothing to send.", self.display_name))
+        self._hand_to_post(address)
 
-        now = fields.Datetime.now()
+    def _hand_to_post(self, address, at=None):
+        """ The post has the box, addressed to ``address``, as of ``at``.  Checks nothing. """
+        now = at or fields.Datetime.now()
         self.write({
             'state': 'in_transit',
             'address': address,

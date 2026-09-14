@@ -1,11 +1,12 @@
 # Odoo Sim — The Game World's Own State
 
 Status: built for manufacturing, purchasing and selling, with money in a game bank,
-goods sent by post, and the paperclip scenario (§12)
+goods sent by post, employees (`EMPLOYEES.md`), and the paperclip scenario (§12)
 Branch: `odoo-sim`
 Target: Odoo 19.0
-Companion to `DESIGN.md` (the clock), `UI_DESIGN.md` (the page) and `MAIL.md`
-(email, which never leaves a world).
+Companion to `DESIGN.md` (the clock), `UI_DESIGN.md` (the page), `MAIL.md`
+(email, which never leaves a world) and `EMPLOYEES.md` (the people who press
+the buttons for the player).
 
 ## 1. Problem
 
@@ -41,9 +42,10 @@ Odoo records what the company says it was paid; the **game bank** holds what
 it was paid. Only game transactions move it, and Odoo hears about them the
 way it would from a real bank, through a bank feed.
 
-Later, autonomous employees will press the same buttons. Email is a system of
-its own (`MAIL.md`): customers write to the company and read its invoices by
-email (§7), and the vendor does not read it yet.
+Employees press the same buttons, and record what they did in Odoo
+(`EMPLOYEES.md`). Email is a system of its own (`MAIL.md`): customers write to
+the company and read its invoices by email (§7), and the vendor does not read
+it yet.
 
 ## 2. The rule
 
@@ -428,12 +430,16 @@ capital, if a scenario wants one, would be the same kind of deposit.
 
 1. finishes every run whose `date_end` has passed;
 2. marks every shipment whose `date_arrival` has passed as arrived;
-3. pays every accepted customer invoice whose `date_due` has passed;
-4. delivers every package in the post whose `date_arrival` has passed, or turns
+3. finishes every employee task whose `date_end` has passed, and records it in
+   Odoo (`EMPLOYEES.md` §4);
+4. pays every accepted customer invoice whose `date_due` has passed;
+5. delivers every package in the post whose `date_arrival` has passed, or turns
    it back;
-5. puts back on the bench every returning package whose return is due, which
-   may be one turned back in step 4;
-6. has every customer still waiting past `date_chase` complain.
+6. puts back on the bench every returning package whose return is due, which
+   may be one turned back in step 5;
+7. has every customer still waiting past `date_chase` complain;
+8. has every employee whose salary is late ask for it, and every one unpaid
+   for too long leave (`EMPLOYEES.md` §7).
 
 Complaints come last, so a package due by `now` spares its customer the email.
 It runs:
@@ -469,6 +475,7 @@ transaction (a test pins it). Settling twice makes the goods once.
 | `POST /game/api/packages/<id>/pack` | `{product_id, qty}` → put goods in it, answer with the snapshot |
 | `POST /game/api/packages/<id>/unpack` | put its goods back on the shelves, answer with the snapshot |
 | `POST /game/api/packages/<id>/send` | `{address}` → write the address on it and post it, answer with the snapshot |
+| `POST /game/api/jobs/<id>/hire` | `{tz}` → hire someone, answer with the snapshot (`EMPLOYEES.md` §6) |
 
 Guards, on every route:
 
@@ -521,8 +528,8 @@ Below that, what was sent.
 `base.group_system`, and nothing to anyone else, the bank included. *Settings →
 Technical → Game World* (debug mode) lists the balance, the ledger, runs,
 shipments, recipes, workstations, vendors, bank accounts and transactions,
-customers, their orders and the invoices they read, and packages (where each
-one really is), read-only.
+customers, their orders and the invoices they read, packages (where each
+one really is), jobs, employees and their tasks, read-only.
 
 **An administrator can still cheat.** A server action with Python code can
 `sudo()` its way into anything. That is treated like editing a save file,
@@ -618,7 +625,7 @@ gets it too.
   and go; who send back what they did not order.
 - A post that charges postage, takes longer to farther addresses, loses
   things, or sells tracking.
-- Players creating recipes; employees pressing buttons.
+- Players creating recipes. (Employees pressing buttons: `EMPLOYEES.md`.)
 
 ## 15. Testing
 

@@ -4,7 +4,8 @@ How to create, drive, pause and stop an odoo-sim world. For *why* any of it
 works this way, see [DESIGN.md](DESIGN.md) (the clock),
 [UI_DESIGN.md](UI_DESIGN.md) (the page), [GAME_STATE.md](GAME_STATE.md)
 (what exists in the world, and the money in its bank, as opposed to what Odoo
-records) and [MAIL.md](MAIL.md) (email, which never leaves a world).
+records), [MAIL.md](MAIL.md) (email, which never leaves a world) and
+[EMPLOYEES.md](EMPLOYEES.md) (the people who do the work).
 
 The one idea worth having up front: **game time is not derived from the clock
 on the wall.** It is a number in a table that the game loop pushes forward. No
@@ -249,11 +250,23 @@ Then, at `http://localhost:8069`:
    not come three game days later, it writes to ask where they are, on its
    order's thread, and keeps writing until they do.
 
+10. **Hire a worker.** Under *Employees* on `/game`, press *Hire*. A worker
+    works nine to five in your browser's time zone, one task at a time, and
+    takes on whatever Odoo says is *Ready*: a manufacturing order (made at the
+    bench from the world's recipe, then marked done), a receipt (the delivery
+    at the door unpacked, then validated), or a delivery order (packed,
+    addressed from the contact in Odoo, posted, then validated). What they
+    record in Odoo is recorded as them. Work left at five carries on at nine.
+11. **Pay them, or lose them.** There is no way to pay anyone yet. A worker's
+    salary, 300 a month, is due at the end of each month. The next morning
+    they write to ask for it, again a week later, and fifteen days after it
+    was due they leave.
+
 To see what the world holds, rather than what Odoo says it holds, turn on
 debug mode and open *Settings → Technical → Game World*: the balance, the
 ledger of every real event, the runs, the shipments, the bank's accounts and
-transactions, the customers' orders, and where every package really is, all
-read-only.
+transactions, the customers' orders, where every package really is, and the
+employees and what they did, all read-only.
 
 ---
 

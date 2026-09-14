@@ -14,7 +14,9 @@ const wire = { id: 1, name: 'Wire', uom: 'm' };
 const clip = { id: 2, name: 'Paperclip', uom: 'Units' };
 
 /** A snapshot, as `game.world._snapshot` builds one. */
-function world({ run = null, shipments = [], bank = null, orders = [], packages = [], sent = [] } = {}) {
+function world({
+    run = null, shipments = [], bank = null, orders = [], packages = [], sent = [], jobs = [], employees = [],
+} = {}) {
     return {
         stock: [{ ...wire, qty: 49.9 }, { ...clip, qty: 0 }],
         workstations: [{
@@ -31,6 +33,8 @@ function world({ run = null, shipments = [], bank = null, orders = [], packages 
         customer_orders: orders,
         packages,
         sent_packages: sent,
+        jobs,
+        employees,
     };
 }
 
@@ -257,4 +261,81 @@ test('a sent package says what went where, and when, but not where it is now', (
         to: 'Binder & Co., 12 Clip Lane, Springfield, OR 97477',
         date: 'Sent 1 Mar 2030, 10:00',
     });
+});
+
+test('a run by an employee says who is making it', () => {
+    const [station] = describeWorld({
+        world: world({ run: { ...run, worker: 'Alice Adler' } }), reading: running('2030-03-01T09:05:00Z'),
+    }, UTC).stations;
+
+    assert.equal(station.run.text, 'Alice Adler is making 10 Paperclip for WH/MO/00030');
+});
+
+test('a delivery an employee is unpacking cannot be accepted', () => {
+    const [shown] = describeWorld({
+        world: world({ shipments: [{ ...shipment, state: 'arrived', worker: 'Alice Adler' }] }),
+        reading: running('2030-03-02T10:00:00Z'),
+    }, UTC).shipments;
+
+    assert.equal(shown.status, 'Alice Adler is unpacking it');
+    assert.equal(shown.canAccept, false);
+});
+
+test('a package an employee is packing is theirs', () => {
+    const [shown] = shownPost({ packages: [{ ...box, lines: [{ ...clip, qty: 1 }], worker: 'Bruno Lambert' }] }).bench;
+
+    assert.equal(shown.worker, 'Bruno Lambert is packing it');
+    assert.deepEqual([shown.canPack, shown.canSend, shown.canUnpack], [false, false, false]);
+});
+
+const job = { id: 3, name: 'Worker', wage: 300, currency: 'EUR' };
+const employee = {
+    id: 8, name: 'Alice Adler', job: 'Worker', wage: 300, currency: 'EUR', date_start: '2030-03-01T09:00:00',
+    shift_start: '2030-03-01T09:00:00', shift_end: '2030-03-01T17:00:00',
+    task: null, salary_due: '2030-04-01T00:00:00', date_leave: '2030-04-15T09:00:00',
+};
+
+function shownStaff(overrides, gameNow = '2030-03-01T10:00:00Z', { pending = new Set(), reading = running(gameNow) } = {}) {
+    return describeWorld({ world: world({ jobs: [job], employees: [{ ...employee, ...overrides }] }), reading, pending }, UTC).staff;
+}
+
+test('a job can be hired for, unless a press waits or the world is not running', () => {
+    assert.deepEqual(shownStaff({}).jobs, [{ key: 3, label: 'Hire: Worker, €300.00 a month', canHire: true }]);
+    assert.equal(shownStaff({}, undefined, { pending: new Set(['job:3']) }).jobs[0].canHire, false);
+    const paused = { gameNow: new Date('2030-03-01T10:00:00Z'), rate: 1440, paused: true, running: false };
+    assert.equal(shownStaff({}, undefined, { reading: paused }).jobs[0].canHire, false);
+});
+
+test('an employee at work with nothing to do waits for work', () => {
+    const [shown] = shownStaff({}).employees;
+
+    assert.deepEqual(shown, {
+        key: 8, name: 'Alice Adler', job: 'Worker, €300.00 a month',
+        doing: 'Nothing to do', status: 'Waiting for work', tone: 'wait', pay: null,
+    });
+});
+
+test('an employee at work says what they are doing and when it will be done', () => {
+    const task = { text: 'Making 200 Paperclip for WH/MO/00001', date_start: '2030-03-01T09:30:00', date_end: '2030-03-02T10:00:00' };
+    const [shown] = shownStaff({ task }).employees;
+
+    assert.equal(shown.doing, 'Making 200 Paperclip for WH/MO/00001');
+    assert.equal(shown.status, 'Done 2 Mar 2030, 10:00');
+    assert.equal(shown.tone, 'ready');
+});
+
+test('an employee is off before nine and gone home after five, whatever they were doing', () => {
+    const task = { text: 'Packing WH/OUT/00001', date_start: '2030-03-01T16:50:00', date_end: '2030-03-02T09:05:00' };
+    const early = { shift_start: '2030-03-02T09:00:00', shift_end: '2030-03-02T17:00:00' };
+
+    assert.equal(shownStaff({}, '2030-03-01T18:00:00Z').employees[0].status, 'Gone home');
+    assert.equal(shownStaff({ task }, '2030-03-01T18:00:00Z').employees[0].status, 'Gone home');
+    assert.equal(shownStaff({ ...early }, '2030-03-02T07:00:00Z').employees[0].status, 'Off until 09:00');
+    assert.equal(shownStaff({ ...early, task }, '2030-03-02T07:00:00Z').employees[0].status, 'Carries on at 09:00');
+});
+
+test('an employee whose salary is late says when they will leave', () => {
+    const [shown] = shownStaff({ shift_start: '2030-04-02T09:00:00', shift_end: '2030-04-02T17:00:00' }, '2030-04-02T10:00:00Z').employees;
+
+    assert.equal(shown.pay, 'Not paid since 1 Apr 2030, 00:00: leaves 15 Apr 2030, 09:00');
 });

@@ -277,6 +277,70 @@
     <field name="res_model">game.customer.invoice</field>
 </record>
 
+<record id="game_job_view_list" model="ir.ui.view">
+    <field name="model">game.job</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="name"/>
+            <field name="wage"/>
+            <field name="currency_id" column_invisible="1"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_employee_view_list" model="ir.ui.view">
+    <field name="model">game.employee</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="name"/>
+            <field name="job_id"/>
+            <field name="user_id"/>
+            <field name="wage"/>
+            <field name="currency_id" column_invisible="1"/>
+            <field name="tz"/>
+            <field name="date_start"/>
+            <field name="state"/>
+            <field name="date_chase"/>
+            <field name="date_leave"/>
+            <field name="reminder_count"/>
+            <field name="date_left" optional="hide"/>
+            <field name="write_to" optional="hide"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_employee_task_view_list" model="ir.ui.view">
+    <field name="model">game.employee.task</field>
+    <field name="arch" type="xml">
+        <list create="0" edit="0" delete="0">
+            <field name="date_start"/>
+            <field name="employee_id"/>
+            <field name="display_name" string="Task"/>
+            <field name="kind"/>
+            <field name="state"/>
+            <field name="date_end"/>
+            <field name="production_id"/>
+            <field name="picking_id"/>
+            <field name="shipment_id" optional="hide"/>
+            <field name="package_id" optional="hide"/>
+            <field name="note"/>
+        </list>
+    </field>
+</record>
+
+<record id="game_job_action" model="ir.actions.act_window">
+    <field name="name">Jobs</field>
+    <field name="res_model">game.job</field>
+</record>
+<record id="game_employee_action" model="ir.actions.act_window">
+    <field name="name">Employees</field>
+    <field name="res_model">game.employee</field>
+</record>
+<record id="game_employee_task_action" model="ir.actions.act_window">
+    <field name="name">Employee tasks</field>
+    <field name="res_model">game.employee.task</field>
+</record>
+
 <menuitem id="menu_game_world" name="Game World" parent="base.menu_custom" sequence="200">
     <menuitem id="menu_game_stock" action="game_stock_action" sequence="10"/>
     <menuitem id="menu_game_stock_entry" action="game_stock_entry_action" sequence="20"/>
@@ -291,6 +355,9 @@
     <menuitem id="menu_game_customer_order" action="game_customer_order_action" sequence="110"/>
     <menuitem id="menu_game_customer_invoice" action="game_customer_invoice_action" sequence="120"/>
     <menuitem id="menu_game_package" action="game_package_action" sequence="125"/>
+    <menuitem id="menu_game_job" action="game_job_action" sequence="126"/>
+    <menuitem id="menu_game_employee" action="game_employee_action" sequence="127"/>
+    <menuitem id="menu_game_employee_task" action="game_employee_task_action" sequence="128"/>
     <menuitem id="menu_game_email" action="game_email_action" sequence="130"/>
     <menuitem id="menu_game_email_delivery" action="game_email_delivery_action" sequence="140"/>
 </menuitem>

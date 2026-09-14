@@ -9,7 +9,7 @@ and money alike.
 Movements, not totals: the database under test may be a world someone has been
 playing in, where Odoo and the world already disagree (DESIGN.md 8).
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from odoo import Command, fields
@@ -17,6 +17,7 @@ from odoo.addons.base.models.ir_mail_server import IrMail_Server
 from odoo.tests.common import TransactionCase
 
 from odoo.addons.odoo_sim.models.game_post import address_words
+from odoo.addons.odoo_sim.tests.test_employee import zone_at
 
 
 class TestPaperclips(TransactionCase):
@@ -202,10 +203,28 @@ class TestPaperclips(TransactionCase):
         self.assertEqual(wanted.state, 'delivered')
         self.assertOdooMovedWithTheWorld()
 
+    def test_a_worker_makes_paperclips_and_records_them(self):
+        """ Someone hired does what the player would have done, and Odoo moves with the world. """
+        worker = self.env.ref('odoo_sim_paperclips.job_worker')._hire(zone_at(10), self.env.user)
+        self.buy_a_spool()
+        mo = self.env['mrp.production'].create({'product_id': self.clip.id, 'product_qty': 10})
+        mo.action_confirm()
+        # Older than anything already waiting in a world someone has played in.
+        mo.date_start = datetime(2000, 1, 1)
+        task = worker._look_for_work(fields.Datetime.now())
+        self.assertEqual(task.production_id, mo)
+
+        self.world._settle(task.date_end)
+        self.assertEqual((mo.state, mo.write_uid), ('done', worker.user_id))
+        self.assertEqual(self.moved(self.clip)[1], 10)
+        self.assertOdooMovedWithTheWorld()
+
     def test_binder_and_co_can_be_found_at_the_address_odoo_has(self):
         """ The two halves agree at the start: the contact's address in Odoo is where the post finds it. """
         partner = self.customer.partner_id
         if not partner.street:
             self.skipTest("Binder & Co.'s contact predates its address: this world was upgraded into packages")
-        written =f"{partner.name}\n{partner.street}\n{partner.city}, {partner.state_id.code} {partner.zip}\n{partner.country_id.name}"
+        written = self.env['game.employee']._address_on(partner)
+        self.assertEqual(written, "Binder & Co.\n12 Clip Lane\nSpringfield OR 97477\nUnited States",
+                         "what a worker writes on a box")
         self.assertEqual(address_words(written), address_words(self.customer.address))

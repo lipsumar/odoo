@@ -131,6 +131,16 @@
         <field name="complain_after">72</field>
     </record>
 
+    <!--
+        Someone to make paperclips, take in the wire and post the orders, for
+        300 a month: about what Binder & Co.'s orders bring in, if one comes
+        every working day.
+    -->
+    <record id="job_worker" model="game.job">
+        <field name="name">Worker</field>
+        <field name="wage">300</field>
+    </record>
+
 </data>
 
 <!--

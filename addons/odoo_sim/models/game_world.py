@@ -41,10 +41,12 @@ class GameWorld(models.AbstractModel):
         """ Make everything that was due by ``now`` (game time) have happened.
 
         Runs that have ended put their goods into the world; shipments whose
-        arrival time has passed are at the door; customers pay the invoices
+        arrival time has passed are at the door; employees finish their tasks
+        and record them in Odoo; customers pay the invoices
         they agreed to pay; the post reaches the addresses on its packages, and
         brings back the ones addressed to nobody; customers still waiting for
-        what they paid for complain.  Run by a cron triggered at each due instant, and
+        what they paid for complain; employees still waiting for their salary
+        ask for it, or leave.  Run by a cron triggered at each due instant, and
         at the start of every player action, so that an action always sees
         the world as of the moment it was taken -- the cron alone lags by up to
         one cron tick (``cron-tick x rate`` game seconds).
@@ -57,6 +59,10 @@ class GameWorld(models.AbstractModel):
         runs._finish()
         shipments = self._lock_due('game.shipment', 'in_transit', 'date_arrival', now)
         shipments.state = 'arrived'
+        # After runs and arrivals: an employee's run has ended by now, and the
+        # delivery they unpack is at the door.
+        tasks = self._lock_due('game.employee.task', 'working', 'date_end', now)
+        tasks._finish()
         invoices = self._lock_due('game.customer.invoice', 'to_pay', 'date_due', now)
         invoices._pay()
         packages = self._lock_due('game.package', 'in_transit', 'date_arrival', now)
@@ -67,9 +73,13 @@ class GameWorld(models.AbstractModel):
         # Last, so that goods arriving by ``now`` spare their customer the email.
         chased = self._lock_due('game.customer.order', 'paid', 'date_chase', now)
         chased._complain()
-        if runs or shipments or invoices or packages or returned or chased:
+        asking = self._lock_due('game.employee', 'employed', 'date_chase', now)
+        asking._ask_for_pay()
+        leaving = self._lock_due('game.employee', 'employed', 'date_leave', now)
+        leaving._leave_unpaid()
+        if runs or shipments or tasks or invoices or packages or returned or chased or asking or leaving:
             self._changed()
-        return runs, shipments, invoices, packages, returned, chased
+        return runs, shipments, tasks, invoices, packages, returned, chased, asking, leaving
 
     def _lock_due(self, model, state, date_field, now):
         records = self.env[model]
@@ -112,6 +122,11 @@ class GameWorld(models.AbstractModel):
         """
         if 'bus.bus' in self.env:
             self.env['bus.bus'].sudo()._sendone(pulse.CHANNEL, CHANGED, {})
+        # Whatever changed may be work someone can now do: goods on the
+        # shelves, a free station, a delivery at the door.  The cron clears
+        # its due triggers when it has run, so its own changes do not wake it
+        # again and again.
+        self.env['game.employee']._trigger_work()
 
     # -- genesis -------------------------------------------------------------
 
@@ -139,8 +154,8 @@ class GameWorld(models.AbstractModel):
     def _snapshot(self, user=None):
         """ The whole world, as ``GET /game/api/world`` hands it to the page:
         what exists, the workstations, deliveries on their way, the company's
-        bank account, what customers have on order, and the packages on the
-        bench and sent.  A sent package says nothing of where it is: the post
+        bank account, what customers have on order, the packages on the
+        bench and sent, the jobs the company can hire for, and its employees.  A sent package says nothing of where it is: the post
         has no tracking.
 
         One projection for one screen (UI_DESIGN.md 9.4), not a generic read.
@@ -164,6 +179,14 @@ class GameWorld(models.AbstractModel):
         # Read, never opened: this is a GET, and a pure read.
         account = self.env['game.bank.account'].search(
             [('partner_id', '=', self.env.company.partner_id.id)], limit=1)
+        jobs = self.env['game.job'].search([])
+        employees = self.env['game.employee'].search([('state', '=', 'employed')])
+        working = self.env['game.employee.task'].search([('state', '=', 'working')])
+        now = fields.Datetime.now()
+
+        def worker(**match):
+            [(field, record)] = match.items()
+            return working.filtered(lambda task: task[field] == record)[:1].employee_id.name or None
 
         # Everything the world knows how to make, use, buy or sell is listed
         # even at zero: an empty shelf is worth seeing.
@@ -189,6 +212,7 @@ class GameWorld(models.AbstractModel):
                 'date_end': _instant(record.date_end),
                 'order': {'id': record.production_id.id, 'name': record.production_id.name}
                 if record.production_id else None,
+                'worker': worker(run_id=record),
             }
 
         def invoice(record):
@@ -211,6 +235,7 @@ class GameWorld(models.AbstractModel):
                 'address': record.address or None,
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in record.line_ids],
                 'date_posted': _instant(record.date_posted),
+                'worker': worker(package_id=record),
             }
 
         def transaction(record):
@@ -257,6 +282,7 @@ class GameWorld(models.AbstractModel):
                 'date_shipped': _instant(shipment.date_shipped),
                 'date_arrival': _instant(shipment.date_arrival),
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in shipment.line_ids],
+                'worker': worker(shipment_id=shipment),
             } for shipment in shipments],
             'bank': {
                 'number': account.number,
@@ -284,6 +310,10 @@ class GameWorld(models.AbstractModel):
                 date_returned=_instant(record.date_returned),
             ) for record in on_the_bench],
             'sent_packages': [package(record) for record in sent],
+            'jobs': [{
+                'id': job.id, 'name': job.name, 'wage': job.wage, 'currency': job.currency_id.name,
+            } for job in jobs],
+            'employees': [employee._shown(now, _instant) for employee in employees],
         }
         if user is not None:
             snapshot['mail'] = self.env['game.email']._mailbox(user)

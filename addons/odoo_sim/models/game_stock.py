@@ -7,7 +7,7 @@ the game writes them.  See ``odoo_sim/GAME_STATE.md`` section 3.
 """
 from odoo import api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import SQL, float_is_zero, float_round
+from odoo.tools import SQL, float_compare, float_is_zero, float_round
 
 #: Why a quantity entered or left the world.  Appended to as domains join the
 #: game.
@@ -51,6 +51,18 @@ class GameStock(models.Model):
         'CHECK(qty >= 0)',
         "Nothing can exist in a negative quantity.",
     )
+
+    @api.model
+    def _holds(self, quantities):
+        """ Whether the world has at least ``{product: qty}`` on the shelves, each in its own unit. """
+        digits = self.env['decimal.precision'].precision_get('Product Unit')
+        on_hand = {balance.product_id: balance.qty for balance in self.search(
+            [('product_id', 'in', [product.id for product in quantities])])}
+        return all(
+            float_compare(on_hand.get(product, 0.0), float_round(qty, precision_digits=digits),
+                          precision_digits=digits) >= 0
+            for product, qty in quantities.items()
+        )
 
     @api.model
     def _apply(self, product, qty, kind, *, date=None, production=None, shipment=None, package=None):

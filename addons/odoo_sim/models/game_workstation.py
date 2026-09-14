@@ -25,7 +25,7 @@ class GameWorkstation(models.Model):
         help="The work center that models this station in Odoo. Informational: the world never reads it.")
     production_ids = fields.One2many('game.production', 'workstation_id', "Runs")
 
-    def _start(self, qty=1.0, mrp_production=None):
+    def _start(self, qty=1.0, mrp_production=None, date_end=None):
         """ Start a run of ``qty`` units: take the components now, make the goods later.
 
         Components leave the world when the run starts, because that is when
@@ -38,6 +38,10 @@ class GameWorkstation(models.Model):
         says it is for.  It is informational only -- nothing in the world ever
         reads the order back, so an order edited or cancelled afterwards
         changes nothing here.
+
+        ``date_end`` is when the run ends, for a run that does not go straight
+        through: an employee's stops at the end of their working day.  By
+        default the recipe's duration from now.
         """
         self.ensure_one()
         if qty <= 0:
@@ -64,7 +68,7 @@ class GameWorkstation(models.Model):
             'recipe_id': self.recipe_id.id,
             'qty': qty,
             'date_start': now,
-            'date_end': now + timedelta(minutes=self.recipe_id.duration * qty),
+            'date_end': date_end or now + timedelta(minutes=self.recipe_id.duration * qty),
             'production_id': mrp_production.id if mrp_production else False,
         })
         stock = self.env['game.stock']

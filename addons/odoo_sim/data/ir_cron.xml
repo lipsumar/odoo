@@ -62,6 +62,21 @@
     <field name="interval_type">hours</field>
 </record>
 
+<!--
+    Woken whenever the world changes, whenever Odoo reserves or confirms
+    stock moves, when someone is hired, and at the next nine o'clock for
+    employees off work (EMPLOYEES.md).
+-->
+<record id="ir_cron_employees_work" model="ir.cron" forcecreate="True">
+    <field name="name">Game world: employees look for work</field>
+    <field name="model_id" ref="model_game_employee"/>
+    <field name="state">code</field>
+    <field name="code">model._cron_work()</field>
+    <field name="user_id" ref="base.user_root"/>
+    <field name="interval_number">1</field>
+    <field name="interval_type">hours</field>
+</record>
+
 <record id="ir_cron_bank_feed" model="ir.cron" forcecreate="True">
     <field name="name">Game bank: import transactions into Odoo</field>
     <field name="model_id" ref="account.model_account_bank_statement_line"/>

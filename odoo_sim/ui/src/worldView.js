@@ -1,7 +1,8 @@
 /**
  * The world on the page: the company's money, what exists, what the
- * workstations are doing, what customers want, the packages on the bench and
- * sent, and what is at the door.  See GAME_STATE.md 7, 8 and 10.
+ * workstations are doing, who works there, what customers want, the packages
+ * on the bench and sent, and what is at the door.  See GAME_STATE.md 7, 8 and
+ * 10, and EMPLOYEES.md.
  *
  * As with the clock, `describeWorld` is the whole of the decision and touches
  * no DOM; `createWorldView` writes its answer into elements it keeps, rather
@@ -59,9 +60,10 @@ function describeStation(station, now, acting, pending, formats) {
         const start = parseInstant(run.date_start);
         const end = parseInstant(run.date_end);
         const over = now !== null && now >= end;
+        const making = `${goods({ ...station.product, qty: run.qty }, formats)}`
+            + (run.order ? ` for ${run.order.name}` : '');
         shown.run = {
-            text: `Making ${goods({ ...station.product, qty: run.qty }, formats)}`
-                + (run.order ? ` for ${run.order.name}` : ''),
+            text: run.worker ? `${run.worker} is making ${making}` : `Making ${making}`,
             progress: over ? 1 : now === null ? 0 : Math.max(0, (now - start) / (end - start)),
             // Past its end but not yet settled by the cron: the goods land
             // within a cron tick, or at once if anyone acts in the meantime.
@@ -75,13 +77,18 @@ function describeShipment(shipment, now, acting, pending, formats) {
     const arrival = parseInstant(shipment.date_arrival);
     // Arrived by the clock counts as arrived: accepting settles first.
     const here = shipment.state === 'arrived' || (now !== null && now >= arrival);
+    let status = here ? 'At the door' : `Arrives ${formats.datetime.format(arrival)}`;
+    if (shipment.worker) {
+        status = `${shipment.worker} is unpacking it`;
+    }
     return {
         key: shipment.id,
         title: shipment.order ? `${shipment.order} from ${shipment.vendor}` : `From ${shipment.vendor}`,
         contents: shipment.lines.map((line) => goods(line, formats)).join(', '),
         here,
-        status: here ? 'At the door' : `Arrives ${formats.datetime.format(arrival)}`,
-        canAccept: acting && here && !pending,
+        status,
+        unpacking: Boolean(shipment.worker),
+        canAccept: acting && here && !pending && !shipment.worker,
     };
 }
 
@@ -154,10 +161,12 @@ function describePost(world, acting, pending, formats) {
     return {
         canTake: acting && !pending.has('package:new'),
         bench: (world.packages ?? []).map((box) => {
-            const free = acting && !pending.has(`package:${box.id}`);
+            // A box an employee is packing is theirs until it goes to the post.
+            const free = acting && !pending.has(`package:${box.id}`) && !box.worker;
             return {
                 key: box.id,
                 title: box.name,
+                worker: box.worker ? `${box.worker} is packing it` : null,
                 contents: contents(box) || 'Empty',
                 returned: box.returned
                     ? `Returned ${formats.datetime.format(parseInstant(box.date_returned))}: ${box.returned}`
@@ -179,12 +188,66 @@ function describePost(world, acting, pending, formats) {
 }
 
 /**
+ * One employee: what they are doing, whether they are at work at all, and
+ * whether they have been paid.  The snapshot says when their working day
+ * starts and ends as of when it was taken, and the clock moves on from there.
+ */
+function describeEmployee(employee, now, formats) {
+    const money = (value) => formats.money(value, employee.currency);
+    const start = parseInstant(employee.shift_start);
+    const end = parseInstant(employee.shift_end);
+    const { task } = employee;
+    const taskEnd = task ? parseInstant(task.date_end) : null;
+
+    let status;
+    let tone = 'ready';
+    if (now !== null && now < start) {
+        status = task ? `Carries on at ${formats.time.format(start)}` : `Off until ${formats.time.format(start)}`;
+        tone = 'wait';
+    } else if (now !== null && now >= end && !(taskEnd !== null && now >= taskEnd)) {
+        status = 'Gone home';
+        tone = 'wait';
+    } else if (task) {
+        status = now !== null && now >= taskEnd ? 'Finishing…' : `Done ${formats.datetime.format(taskEnd)}`;
+    } else {
+        status = 'Waiting for work';
+        tone = 'wait';
+    }
+
+    const due = employee.salary_due ? parseInstant(employee.salary_due) : null;
+    const unpaid = due !== null && now !== null && now >= due && employee.date_leave;
+    return {
+        key: employee.id,
+        name: employee.name,
+        job: `${employee.job}, ${money(employee.wage)} a month`,
+        doing: task ? task.text : 'Nothing to do',
+        status,
+        tone,
+        pay: unpaid
+            ? `Not paid since ${formats.datetime.format(due)}: leaves ${formats.datetime.format(parseInstant(employee.date_leave))}`
+            : null,
+    };
+}
+
+/** Who works for the company, and the jobs it can hire for. */
+function describeStaff(world, now, acting, pending, formats) {
+    return {
+        jobs: (world.jobs ?? []).map((job) => ({
+            key: job.id,
+            label: `Hire: ${job.name}, ${formats.money(job.wage, job.currency)} a month`,
+            canHire: acting && !pending.has(`job:${job.id}`),
+        })),
+        employees: (world.employees ?? []).map((employee) => describeEmployee(employee, now, formats)),
+    };
+}
+
+/**
  * Describe `{ world, reading, pending, error }` as what to show.
  *
  * `reading` is the clock (`readClock`), used for progress and for whether the
  * world is running at all: nothing can be done in a paused or stopped world,
  * and the server refuses it anyway.  `pending` holds the keys of actions in
- * flight (`station:<id>`, `shipment:<id>`, `package:<id>`, `package:new`),
+ * flight (`station:<id>`, `shipment:<id>`, `package:<id>`, `package:new`, `job:<id>`),
  * whose buttons wait.
  */
 export function describeWorld({ world, reading, pending = new Set(), error = null }, formats) {
@@ -209,6 +272,7 @@ export function describeWorld({ world, reading, pending = new Set(), error = nul
         bank: describeBank(world.bank ?? null, formats),
         orders: (world.customer_orders ?? []).map((order) => describeOrder(order, now, formats)),
         post: describePost(world, acting, pending, formats),
+        staff: describeStaff(world, now, acting, pending, formats),
     };
 }
 
@@ -257,8 +321,8 @@ export function keyed(container, items, create, update) {
  *
  * `actions.start(stationId, { qty, productionId })`, `actions.accept(shipmentId)`,
  * `actions.newPackage()`, `actions.pack(packageId, { productId, qty })`,
- * `actions.unpack(packageId)` and `actions.post(packageId, address)` are called
- * when the player presses a button.
+ * `actions.unpack(packageId)`, `actions.post(packageId, address)` and
+ * `actions.hire(jobId)` are called when the player presses a button.
  */
 export function createWorldView(root, actions, formats = worldFormats()) {
     const error = element('p', 'world-error');
@@ -293,12 +357,18 @@ export function createWorldView(root, actions, formats = worldFormats()) {
     const sentTitle = element('h3', 'sent-title', 'Sent');
     const sent = element('ul', 'sent');
 
+    const jobs = element('div', 'jobs');
+    const employees = element('ul', 'employees');
+    const noEmployees = element('p', 'empty', 'Nobody works here yet.');
+    const staff = panel('Employees', jobs, employees, noEmployees);
+
     const world = element('div', 'world');
     world.append(
         error,
         bank,
         panel('On hand', stockTable),
         panel('Workstations', stations),
+        staff,
         panel('Customer orders', orders, noOrders),
         panel('Post', takeBox, bench, emptyBench, sentTitle, sent),
         panel('Deliveries', shipments, noShipments),
@@ -408,7 +478,7 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         refs.title.textContent = shipment.title;
         refs.contents.textContent = shipment.contents;
         refs.status.textContent = shipment.status;
-        refs.button.hidden = !shipment.here;
+        refs.button.hidden = !shipment.here || shipment.unpacking;
         refs.button.disabled = !shipment.canAccept;
     }
 
@@ -442,6 +512,7 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         const item = element('li', 'package');
         const refs = {
             title: element('h3'),
+            worker: element('p', 'package-worker'),
             returned: element('p', 'package-returned'),
             contents: element('p'),
             form: element('form', 'package-form'),
@@ -486,7 +557,7 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         const buttons = element('div', 'package-actions');
         buttons.append(refs.send, refs.unpack);
 
-        item.append(refs.title, refs.returned, refs.contents, refs.form, addressLabel, buttons);
+        item.append(refs.title, refs.worker, refs.returned, refs.contents, refs.form, addressLabel, buttons);
         item.refs = refs;
         return item;
     }
@@ -500,6 +571,8 @@ export function createWorldView(root, actions, formats = worldFormats()) {
     function updatePackage(item, box) {
         const { refs } = item;
         refs.title.textContent = box.title;
+        refs.worker.hidden = !box.worker;
+        refs.worker.textContent = box.worker ?? '';
         refs.returned.hidden = !box.returned;
         refs.returned.textContent = box.returned ?? '';
         refs.contents.textContent = box.contents;
@@ -523,6 +596,41 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         refs.unpack.disabled = !box.canUnpack;
         refs.canSend = box.canSend;
         updateSend(refs);
+    }
+
+    function createJob(job) {
+        const button = element('button');
+        button.type = 'button';
+        button.addEventListener('click', () => actions.hire(job.key));
+        return button;
+    }
+
+    function updateJob(button, job) {
+        button.textContent = job.label;
+        button.disabled = !job.canHire;
+    }
+
+    function createEmployee() {
+        const item = element('li', 'employee');
+        item.append(
+            element('h3'),
+            element('p', 'employee-job'),
+            element('p', 'employee-doing'),
+            element('p', 'employee-status'),
+            element('p', 'employee-pay'),
+        );
+        return item;
+    }
+
+    function updateEmployee(item, employee) {
+        item.dataset.tone = employee.tone;
+        const [name, job, doing, status, pay] = item.children;
+        name.textContent = employee.name;
+        job.textContent = employee.job;
+        doing.textContent = employee.doing;
+        status.textContent = employee.status;
+        pay.hidden = !employee.pay;
+        pay.textContent = employee.pay ?? '';
     }
 
     function createSent() {
@@ -556,6 +664,10 @@ export function createWorldView(root, actions, formats = worldFormats()) {
         emptyBench.hidden = shown.post.bench.length > 0;
         keyed(sent, shown.post.sent, createSent, updateSent);
         sentTitle.hidden = shown.post.sent.length === 0;
+        staff.hidden = shown.staff.jobs.length === 0 && shown.staff.employees.length === 0;
+        keyed(jobs, shown.staff.jobs, createJob, updateJob);
+        keyed(employees, shown.staff.employees, createEmployee, updateEmployee);
+        noEmployees.hidden = shown.staff.employees.length > 0;
         bank.hidden = !shown.bank;
         if (shown.bank) {
             balance.textContent = shown.bank.balance;
