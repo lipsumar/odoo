@@ -1,43 +1,36 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """Tests for the world's post (see odoo_sim/MAIL.md).
 
-Every class pins a running world with ``game_clock.override``, at a game
-instant a few years off, so that the suite passes on an ordinary database as
-on a world (DESIGN.md 8) and so that game time is visibly not real time.
-
-Under test, ``ir.mail_server._disable_send`` holds every ``mail.mail`` back.
-``sending()`` lets Odoo send where a test needs it to -- with a tripwire on
-``smtplib``, so that "sent" can only ever mean "posted into the world".
+Every class pins its world at a game instant a few years off, so that game
+time is visibly not real time.
 """
 import json
 import re
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from unittest.mock import patch
 
 from odoo import game_clock
-from odoo.addons.base.models.ir_mail_server import IrMail_Server
 from odoo.exceptions import AccessError, UserError
-from odoo.game_clock import GameClock
 from odoo.tests import new_test_user, tagged
-from odoo.tests.common import HttpCase, TransactionCase
+from odoo.tests.common import HttpCase
 
 from odoo.addons.odoo_sim.controllers import main
+from odoo.addons.odoo_sim.tests.common import SimCase, sending
 
 GAME_NOW = datetime(2031, 5, 4, 9, 0, 0)
 DOMAIN = 'sim-mail.example.com'
 CUSTOMER = 'carla@outside.example.com'
 
 
-class MailCase(TransactionCase):
+class MailCase(SimCase):
+
+    game_now = GAME_NOW
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.dbname = cls.env.cr.dbname
-        cls.addClassCleanup(game_clock.invalidate, cls.dbname)
-        cls.world_at(GAME_NOW)
 
         # The company's mail: its domain, and one alias that makes products.
         cls.alias_domain = cls.env['mail.alias.domain'].create({'name': DOMAIN})
@@ -61,24 +54,6 @@ class MailCase(TransactionCase):
         cls.Email = cls.env['game.email']
         cls.Delivery = cls.env['game.email.delivery']
 
-    def setUp(self):
-        super().setUp()
-        # Afresh for every test, so that a long run never sees its world stop.
-        self.world_at(GAME_NOW)
-
-    @classmethod
-    def world_at(cls, game_now, *, paused=False):
-        now = datetime.now()
-        game_clock.override(cls.dbname, GameClock(game_now, now, 1.0, paused, timedelta(hours=1)))
-
-    @contextmanager
-    def sending(self):
-        """ Let Odoo send, which in a world means posting -- and never SMTP. """
-        tripwire = AssertionError("an SMTP connection was attempted")
-        with patch.object(IrMail_Server, '_disable_send', return_value=False), \
-                patch('smtplib.SMTP', side_effect=tripwire), \
-                patch('smtplib.SMTP_SSL', side_effect=tripwire):
-            yield
 
     def mail(self, to, subject="Hello", body="<p>Hello there</p>", sender=None, **kwargs):
         """ Someone outside writes to ``to``. """
@@ -102,7 +77,7 @@ class TestOutgoing(MailCase):
             'body_html': "<p>It has shipped.</p>",
             'auto_delete': False,
         })
-        with self.sending():
+        with sending():
             mail.send()
 
         self.assertEqual(mail.state, 'sent', mail.failure_reason)
@@ -127,7 +102,7 @@ class TestOutgoing(MailCase):
         mail_server = self.env['ir.mail_server']
         message = mail_server._build_email__(
             'shop@outside.example.com', [CUSTOMER], "Hi", "Hi", email_bcc=['auditor@outside.example.com'])
-        with self.sending():
+        with sending():
             message_id = mail_server.send_email(message)
         posted = self.Email.search([('message_id', '=', message_id)])
 
@@ -136,7 +111,7 @@ class TestOutgoing(MailCase):
 
     def test_a_notification_says_what_it_is_about(self):
         acme = self.env['res.partner'].create({'name': "Acme"})
-        with self.sending():
+        with sending():
             note = acme.message_post(
                 body="Call them back?", partner_ids=self.player.partner_id.ids,
                 message_type='comment', subtype_xmlid='mail.mt_comment',
@@ -233,7 +208,7 @@ class TestDelivery(MailCase):
     def test_a_reply_lands_on_the_thread_it_answers(self):
         """ The player answers a notification from their inbox, and Odoo files the answer. """
         acme = self.env['res.partner'].create({'name': "Acme"})
-        with self.sending():
+        with sending():
             note = acme.message_post(
                 body="Call them back?", partner_ids=self.player.partner_id.ids,
                 message_type='comment', subtype_xmlid='mail.mt_comment',

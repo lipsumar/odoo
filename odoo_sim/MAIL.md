@@ -44,8 +44,8 @@ Three places, from the most to the least specific:
 
 | where | what it does in a world |
 |---|---|
-| `odoo_sim/models/ir_mail_server.py` | `send_email` posts the message into the world (`game.email._post`) and returns its Message-Id, as a successful send does. `_connect__` returns a stand-in session, so no SMTP connection is ever opened. `test_smtp_connection` refuses. |
-| `odoo_sim/models/fetchmail.py` | an incoming mail server fetches nothing: `_connect__` refuses, and `_fetch_mail` returns the refusal (the button raises it; the cron lets it go). |
+| `addons/odoo_sim/models/ir_mail_server.py` | `send_email` posts the message into the world (`game.email._post`) and returns its Message-Id, as a successful send does. `_connect__` returns a stand-in session, so no SMTP connection is ever opened. `test_smtp_connection` refuses. |
+| `addons/odoo_sim/models/fetchmail.py` | an incoming mail server fetches nothing: `_connect__` refuses, and `_fetch_mail` returns the refusal (the button raises it; the cron lets it go). |
 | core, `ir_mail_server._connect__` | **the backstop**: on a game world, refuse to open an SMTP connection at all, with `MailDeliveryException`. This is what protects a world *without* the game installed — `sim_init` and `game_run` work on any database (README), and the fetchmail and notification crons would still run. Six lines, placed after upstream's test-mode check so test behaviour is unchanged. |
 
 `send_email` is the chokepoint for everything Odoo sends: `mail.mail._send`,
@@ -279,10 +279,7 @@ mailbox, where a future vendor that reads email will find it.
 
 ## 10. Testing
 
-```bash
-odoo-bin -d <db> -u odoo_sim --test-tags /odoo_sim,/base:TestGameClockMail --stop-after-init
-cd odoo_sim/ui && npm test
-```
+How to run them: README.md, "Running the tests".
 
 `addons/odoo_sim/tests/test_mail.py` pins a running world at a game instant
 years away from real time, and in every test that lets Odoo send, it trips

@@ -17,19 +17,22 @@ walk away from is exactly where you left it when you come back.
 ## Quick start
 
 ```bash
-# 1. an ordinary Odoo database
-odoo-bin -d mygame --stop-after-init
+# 1. a database with the game and its paperclip scenario installed
+odoo-bin -d mygame -i odoo_sim,odoo_sim_paperclips --stop-after-init
 
 # 2. make it a world: 720 game seconds per real second
 odoo-bin sim_init -d mygame --rate 720
 
-# 3. start time
+# 3. build the game page, once (Node 20.19+ or 22.12+)
+(cd odoo_sim/ui && npm install && npm run build)
+
+# 4. start time, and serve the game
 odoo-bin game_run -d mygame
 ```
 
-Step 1 needs no `-i`: Odoo installs `base` when it initialises a database, and
-everything else a world needs arrives with it. Add `--without-demo=all` if you
-would rather not have Odoo's demo records in your world.
+Then log in at `http://localhost:8069` (`admin` / `admin` on a new database)
+and open `http://localhost:8069/game`. To play the scenario, see "Playing the
+paperclip scenario" below.
 
 Game time is now running at 720x. One real second is twelve game minutes; one
 real hour is a game month. Stop the loop with Ctrl-C and the world stops with
@@ -44,6 +47,67 @@ watch -n1 'psql -d mygame -tAc "SET search_path=public,pg_catalog; SELECT now()"
 `SET search_path` is the whole trick: it puts the game's `now()` ahead of
 PostgreSQL's, so a plain `SELECT now()` returns game time. Without it you get
 real time.
+
+---
+
+## Installing the game
+
+The game is two Odoo modules, installed like any other:
+
+| module | what it is |
+|---|---|
+| `odoo_sim` | the game: the world's own state, its agents, its bank, its post and its page. It brings `mrp`, `purchase_stock` and `sale_stock`, and accounting with them |
+| `odoo_sim_paperclips` | the first scenario: a company that makes paperclips, its vendor and its customer. Depends on `odoo_sim` |
+
+```bash
+odoo-bin -d mygame -i odoo_sim --stop-after-init                        # the game alone
+odoo-bin -d mygame -i odoo_sim,odoo_sim_paperclips --stop-after-init    # the game and the scenario
+odoo-bin -d mygame -u odoo_sim,odoo_sim_paperclips --stop-after-init    # after pulling changes
+```
+
+`-i odoo_sim_paperclips` alone does the same as the second line, since the
+scenario depends on the game. A scenario sets its world up once, at install:
+its records are `noupdate`, and upgrading the module never resets what the
+player did to them. Odoo's demo records stay out unless you ask for them with
+`--with-demo`. Worlds are not migrated between versions of the game: after
+changes to its models, start a new world rather than upgrading an old one.
+
+`sim_init`, `game_run` and `sim_pause` live in `addons/odoo_sim/cli/` and are
+found on the addons path, so they run whether or not `odoo_sim` is installed
+on the database. What needs it installed is everything that lives in the
+database: `/game`, its API, and the world's own state.
+
+### Building the game page
+
+`game_run` serves the game page at `http://localhost:8069/game` alongside the
+ordinary web client. The page is a Vite build that is not checked in, so build
+it once (Node 20.19+ or 22.12+), and again after changing `odoo_sim/ui`:
+
+```bash
+cd odoo_sim/ui
+npm install
+npm run build      # writes addons/odoo_sim/static/dist/
+```
+
+Until you do, `/game` says the frontend is not built and tells you how. The
+clock endpoint works either way.
+
+To work on the frontend, run `npm run dev` there instead and open
+`http://localhost:5173/`. That is Vite's own page, with hot reload, talking to
+Odoo's API and bus through a proxy. Log in on `:8069` first. Set `ODOO_URL` if
+Odoo is not on `http://localhost:8069`.
+
+`bus` is the one module the loop actually uses, for the world pulse, and it
+installs itself: it is `auto_install`, so it arrives as soon as `web` does, and
+`web` is loaded by default (`--load` defaults to `base,rpc,web`). If you do
+manage to end up without it, `game_run` says so and runs anyway:
+
+```
+bus is not installed on mygame: no world pulse will be published, so clients
+cannot tell a running world from a dead one
+```
+
+The clock and the crons are unaffected — only a UI would notice.
 
 ---
 
@@ -87,50 +151,6 @@ world always settles exactly `max_gap × rate` past its last tick — one game
 hour here — and stays there. It is bounded and harmless; it is not a leak.
 
 ---
-
-### Do I need to install anything?
-
-Not to run a world. `sim_init`, `game_run` and `sim_pause` are found on the
-addons path and run whether or not the `odoo_sim` module is installed.
-
-**The UI and the world are the exception.** Routes, templates and the game's
-own models come from the registry, so `/game`, its API and the world's state
-exist only on a database that has the module installed (it brings `mrp`,
-`purchase_stock` and `sale_stock` with it):
-
-```bash
-odoo-bin -d mygame -i odoo_sim --stop-after-init
-```
-
-Then `game_run` serves the game page at `http://localhost:8069/game` alongside
-the ordinary web client. The page is a Vite build that is not checked in, so
-build it once (Node 20.19+ or 22.12+):
-
-```bash
-cd odoo_sim/ui
-npm install
-npm run build      # writes addons/odoo_sim/static/dist/
-```
-
-Until you do, `/game` says the frontend is not built and tells you how. The
-clock endpoint works either way.
-
-To work on the frontend, run `npm run dev` there instead and open
-`http://localhost:5173/`. That is Vite's own page, with hot reload, talking to
-Odoo's API and bus through a proxy. Log in on `:8069` first. Set `ODOO_URL` if
-Odoo is not on `http://localhost:8069`. `npm test` runs the frontend's tests.
-
-`bus` is the one module the loop actually uses, for the world pulse, and it
-installs itself: it is `auto_install`, so it arrives as soon as `web` does, and
-`web` is loaded by default (`--load` defaults to `base,rpc,web`). If you do
-manage to end up without it, `game_run` says so and runs anyway:
-
-```
-bus is not installed on mygame: no world pulse will be published, so clients
-cannot tell a running world from a dead one
-```
-
-The clock and the crons are unaffected — only a UI would notice.
 
 ## Running it
 
@@ -203,7 +223,8 @@ no longer the only thing driving the world.
 
 A company that makes paperclips from wire it buys in 50 m spools, and sells
 them to a customer who pays through the game bank
-([GAME_STATE.md](GAME_STATE.md) §12):
+([GAME_STATE.md](GAME_STATE.md) §12). The quick start installs it; into a
+world that does not have it yet:
 
 ```bash
 odoo-bin -d mygame -i odoo_sim_paperclips --stop-after-init
@@ -474,7 +495,7 @@ a game-time column.
 
 ```bash
 dropdb --if-exists mygame
-odoo-bin -d mygame --stop-after-init
+odoo-bin -d mygame -i odoo_sim,odoo_sim_paperclips --stop-after-init
 odoo-bin sim_init -d mygame --rate 720
 odoo-bin game_run -d mygame              # leave running
 
@@ -486,3 +507,28 @@ odoo-bin sim_pause -d mygame --resume
                                           # Ctrl-C the loop
 psql -d mygame -tAc "SET search_path=public,pg_catalog; SELECT now()"   # frozen again
 ```
+
+---
+
+## Running the tests
+
+```bash
+# the game and the scenario
+odoo-bin -d simtest -i odoo_sim,odoo_sim_paperclips --test-tags /odoo_sim,/odoo_sim_paperclips --stop-after-init
+
+# the clock, in core: on a database with nothing but base
+odoo-bin -d simtest_core -i base --test-tags /base:TestGameClockMath,/base:TestGameClockMail,/base:TestGameClockDatabase,/base:TestGameClockCron --stop-after-init
+
+# the page
+cd odoo_sim/ui && npm test
+```
+
+The game's suites pass on any database: a new one, an ordinary one, or a world
+someone has been playing in. Every test pins a running world of its own and
+makes what it needs, down to a chart of accounts
+(`addons/odoo_sim/tests/common.py`). On a database that already has the
+modules, use `-u` instead of `-i`.
+
+The core tests run while `base` installs, with nothing else loaded. On a
+database with more modules installed, the records they create miss columns
+those modules made required, so give them a database of their own.

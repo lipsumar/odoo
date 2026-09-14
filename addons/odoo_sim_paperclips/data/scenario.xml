@@ -129,6 +129,10 @@
         <field name="payment_delay">4</field>
         <field name="interval">24</field>
         <field name="complain_after">72</field>
+        <field name="address">Binder &amp; Co.
+12 Clip Lane
+Springfield, OR 97477
+United States</field>
     </record>
 
     <!--
@@ -141,30 +145,17 @@
         <field name="wage">300</field>
     </record>
 
+    <!-- Binder & Co.'s money. A function in noupdate runs once, at install. -->
+    <function model="game.bank.account" name="_deposit" eval="[ref('partner_customer'), 1000.0]"/>
+
+    <!--
+        Binder & Co. writes to the player, the administrator, who gets an
+        address if they have none: the customer's email lands in their inbox on
+        /game, and Odoo needs a sender's address to email an invoice.
+    -->
+    <function model="game.customer" name="_introduce"
+              eval="[ref('customer_binder'), ref('base.user_admin'), 'you@paperclips.example.com']"/>
+
 </data>
-
-<!--
-    Binder & Co.'s money.  Outside noupdate, so that a world upgrading into
-    this scenario gets it too; _open deposits only into an account that has
-    never moved, so it happens once.
--->
-<function model="game.bank.account" name="_open" eval="[ref('partner_customer'), 1000.0]"/>
-
-<!--
-    Binder & Co. writes to the player, the administrator, who gets an address
-    if they have none: the customer's email lands in their inbox on /game, and
-    Odoo needs a sender's address to email an invoice.  Fills in blanks only,
-    so it too can sit outside noupdate.
--->
-<function model="game.customer" name="_introduce"
-          eval="[ref('customer_binder'), ref('base.user_admin'), 'you@paperclips.example.com']"/>
-
-<!--
-    Where the post finds Binder & Co., which it tells the player when it
-    orders; its contact in Odoo starts out saying the same.  Fills in a blank
-    only, so a world upgrading into packages gets it too.
--->
-<function model="game.customer" name="_give_address"
-          eval="[ref('customer_binder'), 'Binder &amp; Co.\n12 Clip Lane\nSpringfield, OR 97477\nUnited States']"/>
 
 </odoo>

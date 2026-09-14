@@ -13,7 +13,6 @@ import logging
 import optparse
 import sys
 
-import odoo
 import odoo.service.server
 import odoo.sql_db
 import odoo.tools.config
@@ -67,11 +66,6 @@ class GameRun(Command):
 
         if error := loop.unsupported_workers_error(odoo.tools.config['workers']):
             sys.exit(error)
-
-        # A world created before this code knows nothing of forwarding.
-        with odoo.sql_db.db_connect(dbname).cursor() as cr:
-            game_clock.upgrade(cr)
-            cr.commit()
 
         clock = game_clock.clock_for(dbname)
         if clock is None:

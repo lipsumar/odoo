@@ -1,87 +1,24 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """Tests for the game world's own state (see odoo_sim/GAME_STATE.md).
 
-Every test here builds its own products, recipe, workstation and vendor, so the
-suite does not depend on the paperclip scenario -- that has its own smoke test
-in ``odoo_sim_paperclips``.
-
-Time is never frozen.  The suite runs against ordinary databases and game
-worlds alike (DESIGN.md 8), and on a world ``fields.Datetime.now()`` is game
-time, which freezegun does not pin.  So settling is always given an explicit
-instant, taken relative to the record under test: "a second before this run
-ends", never "at ten o'clock".
+Every test here builds its own products, recipe, workstation and vendor
+(``common.WorldCase``), so the suite does not depend on the paperclip scenario
+-- that has its own smoke test in ``odoo_sim_paperclips``.
 """
 import json
 import re
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import patch
 
-from odoo import Command, game_clock
+from odoo import Command
 from odoo.exceptions import AccessError, UserError
-from odoo.game_clock import GameClock
 from odoo.tests import new_test_user, tagged
-from odoo.tests.common import HttpCase, TransactionCase
+from odoo.tests.common import HttpCase
 
 from odoo.addons.odoo_sim import pulse
 from odoo.addons.odoo_sim.controllers import main
 from odoo.addons.odoo_sim.models.game_world import CHANGED
-
-
-class WorldCase(TransactionCase):
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.metre = cls.env.ref('uom.product_uom_meter')
-        cls.unit = cls.env.ref('uom.product_uom_unit')
-        cls.spool = cls.env['uom.uom'].create({
-            'name': "Test spool (50 m)", 'relative_factor': 50, 'relative_uom_id': cls.metre.id,
-        })
-        cls.wire, cls.clip = cls.env['product.product'].create([
-            {'name': "Test wire", 'is_storable': True, 'uom_id': cls.metre.id},
-            {'name': "Test clip", 'is_storable': True, 'uom_id': cls.unit.id},
-        ])
-        cls.recipe = cls.env['game.recipe'].create({
-            'product_id': cls.clip.id,
-            'duration': 2,
-            'line_ids': [Command.create({'product_id': cls.wire.id, 'qty': 0.1})],
-        })
-        cls.station = cls.env['game.workstation'].create({'name': "Test bench", 'recipe_id': cls.recipe.id})
-        cls.partner = cls.env['res.partner'].create({'name': "Test wire vendor", 'is_company': True})
-        cls.vendor = cls.env['game.vendor'].create({
-            'partner_id': cls.partner.id, 'lead_time': 24, 'product_ids': [Command.link(cls.wire.id)],
-        })
-        cls.stock = cls.env['game.stock']
-        cls.world = cls.env['game.world']
-
-    def on_hand(self, product):
-        """ What exists in the world, read back from the database. """
-        self.stock.invalidate_model()
-        return self.stock.search([('product_id', '=', product.id)]).qty
-
-    def ledger_total(self, product):
-        return sum(self.env['game.stock.entry'].search([('product_id', '=', product.id)]).mapped('qty'))
-
-    def give(self, product, qty):
-        self.stock._apply(product, qty, 'genesis')
-
-    @contextmanager
-    def refused(self, why):
-        """ ``assertRaises(UserError)``, matching ``why``.
-
-        Odoo's ``assertRaises`` rolls a savepoint back on the way out, the way
-        a request's transaction would be; unittest's ``assertRaisesRegex`` does
-        not, and would leave half an action behind for the test to trip over.
-        """
-        with self.assertRaises(UserError) as caught:
-            yield
-        self.assertRegex(str(caught.exception), why)
-
-    def notices(self):
-        """ The world-changed notices queued on this transaction's bus. """
-        values = self.env.cr.precommit.data.get('bus.bus.values', [])
-        return [value for value in values if f'"{CHANGED}"' in value['message']]
+from odoo.addons.odoo_sim.tests.common import WorldCase
 
 
 class TestLedger(WorldCase):
@@ -461,24 +398,11 @@ class TestSnapshot(WorldCase):
 
 @tagged('-at_install', 'post_install')
 class TestWorldApi(WorldCase, HttpCase):
-    """The world's endpoints, over real HTTP.
-
-    The clock is pinned with ``game_clock.override`` as in ``test_controllers``,
-    with a ``max_gap`` of an hour so that a slow test run does not see its own
-    world die under it.
-    """
+    """The world's endpoints, over real HTTP."""
 
     def setUp(self):
         super().setUp()
-        self.addCleanup(game_clock.invalidate, self.env.cr.dbname)
-        self.world_running()
         self.authenticate('admin', 'admin')
-
-    def world_running(self, *, paused=False, silent_for=timedelta(0)):
-        now = datetime.now()
-        game_clock.override(self.env.cr.dbname, GameClock(
-            now, now - silent_for, 1.0, paused, timedelta(hours=1),
-        ))
 
     def post(self, url, body=None):
         return self.url_open(url, json=body, method='POST')
@@ -505,7 +429,7 @@ class TestWorldApi(WorldCase, HttpCase):
 
     def test_nothing_happens_in_a_paused_world(self):
         self.give(self.wire, 10)
-        self.world_running(paused=True)
+        self.world_at(paused=True)
         response = self.start(qty=1)
 
         self.assertEqual(response.status_code, 422)
@@ -516,7 +440,7 @@ class TestWorldApi(WorldCase, HttpCase):
     def test_nothing_happens_in_a_world_nobody_is_ticking(self):
         """ The run would start, and no cron would ever finish it (DESIGN.md 3.3). """
         self.give(self.wire, 10)
-        self.world_running(silent_for=timedelta(hours=2))
+        self.world_at(silent_for=timedelta(hours=2))
 
         self.assertEqual(self.start(qty=1).status_code, 422)
         self.assertFalse(self.station.production_ids)

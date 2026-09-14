@@ -40,6 +40,11 @@ def _acting():
     return world
 
 
+def _positive(value):
+    """ Whether ``value`` is a positive number, as JSON has them: a boolean or a string is not. """
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0
+
+
 def _existing(world, model, record_id):
     record = world.env[model].browse(record_id).exists()
     if not record:
@@ -66,7 +71,7 @@ class GameWorld(http.Controller):
         """ Press the button: start a run of ``qty`` units, optionally for an order. """
         world = _acting()
         station = _existing(world, 'game.workstation', workstation_id)
-        if isinstance(qty, bool) or not isinstance(qty, (int, float)) or qty <= 0:
+        if not _positive(qty):
             raise UserError(world.env._("A run makes a positive quantity."))
         order = _existing(world, 'mrp.production', production_id) if production_id else None
         station._start(qty, order)
@@ -90,7 +95,7 @@ class GameWorld(http.Controller):
         """
         world = _acting()
         job = _existing(world, 'game.job', job_id)
-        job._hire(workday.timezone(tz if isinstance(tz, str) else None, request.env.user.tz), request.env.user)
+        job._hire(workday.timezone(tz, request.env.user.tz), request.env.user)
         return world._snapshot(request.env.user)
 
     @http.route('/game/api/packages', type='json2', auth='user', methods=['POST'])
@@ -108,7 +113,7 @@ class GameWorld(http.Controller):
         if isinstance(product_id, bool) or not isinstance(product_id, int):
             raise UserError(world.env._("What goes in the package?"))
         product = _existing(world, 'product.product', product_id)
-        if isinstance(qty, bool) or not isinstance(qty, (int, float)) or qty <= 0:
+        if not _positive(qty):
             raise UserError(world.env._("Put a positive quantity in the package."))
         package._pack(product, qty)
         return world._snapshot(request.env.user)

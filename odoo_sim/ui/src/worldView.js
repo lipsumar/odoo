@@ -9,30 +9,12 @@
  * than rebuilding them, because it is re-run on every pulse and a rebuilt
  * input loses what the player was typing into it.
  */
+import { element, keyed } from './dom.js';
+import { pageFormats } from './formats.js';
 import { parseInstant } from './reading.js';
 
 /** Odoo's counting unit, left out of quantities: "10 Paperclip", not "10 Units Paperclip". */
 const COUNTING_UNIT = 'Units';
-
-/** `money(value, currency)` formats an amount in an ISO currency, one formatter per currency. */
-export function moneyFormat(locale) {
-    const formats = new Map();
-    return (value, currency) => {
-        if (!formats.has(currency)) {
-            formats.set(currency, new Intl.NumberFormat(locale, { style: 'currency', currency }));
-        }
-        return formats.get(currency).format(value);
-    };
-}
-
-export function worldFormats() {
-    return {
-        number: new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }),
-        time: new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }),
-        datetime: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
-        money: moneyFormat(undefined),
-    };
-}
 
 function amount(qty, uom, formats) {
     const number = formats.number.format(qty);
@@ -276,44 +258,10 @@ export function describeWorld({ world, reading, pending = new Set(), error = nul
     };
 }
 
-export function element(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) {
-        node.className = className;
-    }
-    if (text !== undefined) {
-        node.textContent = text;
-    }
-    return node;
-}
-
 function panel(title, ...children) {
     const section = element('section', 'panel');
     section.append(element('h2', null, title), ...children);
     return section;
-}
-
-/**
- * Make `container`'s children match `items`, keyed by `item.key`: existing
- * nodes are updated in place and only moved when the list itself changed, so
- * a focused input or a half-pressed button survives a render.
- */
-export function keyed(container, items, create, update) {
-    const existing = new Map([...container.children].map((node) => [node.dataset.key, node]));
-    const nodes = items.map((item) => {
-        let node = existing.get(String(item.key));
-        if (!node) {
-            node = create(item);
-            node.dataset.key = item.key;
-        }
-        update(node, item);
-        return node;
-    });
-    const same = nodes.length === container.children.length
-        && nodes.every((node, index) => container.children[index] === node);
-    if (!same) {
-        container.replaceChildren(...nodes);
-    }
 }
 
 /**
@@ -324,7 +272,7 @@ export function keyed(container, items, create, update) {
  * `actions.unpack(packageId)`, `actions.post(packageId, address)` and
  * `actions.hire(jobId)` are called when the player presses a button.
  */
-export function createWorldView(root, actions, formats = worldFormats()) {
+export function createWorldView(root, actions, formats = pageFormats()) {
     const error = element('p', 'world-error');
     error.setAttribute('role', 'alert');
 

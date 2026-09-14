@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, mock, test } from 'node:test';
 
-import { readWorld, syncWorld } from '../src/sync.js';
+import { readJson, syncWorld } from '../src/sync.js';
 
 const answer = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body });
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -21,12 +21,12 @@ beforeEach(() => {
 
 test('a refusal reads as the sentence the server gave', async () => {
     const response = answer(422, { name: 'odoo.exceptions.UserError', message: 'There is not enough Wire in the world' });
-    await assert.rejects(readWorld(response), { message: 'There is not enough Wire in the world', status: 422 });
+    await assert.rejects(readJson(response), { message: 'There is not enough Wire in the world', status: 422 });
 });
 
 test('a failure with no JSON body still says something', async () => {
     const response = { status: 502, ok: false, json: async () => { throw new SyntaxError('no'); } };
-    await assert.rejects(readWorld(response), { message: 'The server answered 502' });
+    await assert.rejects(readJson(response), { message: 'The server answered 502' });
 });
 
 test('an older answer never replaces a newer one', async () => {

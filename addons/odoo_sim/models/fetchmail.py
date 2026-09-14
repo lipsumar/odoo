@@ -9,7 +9,7 @@ company's -- must not pour real mail into it.  See ``odoo_sim/MAIL.md``.
 from odoo import models
 from odoo.exceptions import UserError
 
-from odoo.addons.odoo_sim.models.game_mail import is_world
+from odoo.addons.odoo_sim.utils import is_world
 
 
 class FetchmailServer(models.Model):

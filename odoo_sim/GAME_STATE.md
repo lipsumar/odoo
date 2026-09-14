@@ -76,7 +76,7 @@ every world write shares a transaction with the Odoo writes around it
 
 | model | what it is |
 |---|---|
-| `game.stock.entry` | append-only ledger: `date`, `product_id`, signed `qty`, `kind` (`genesis` / `manufactured` / `consumed` / `received` / `packed` / `unpacked`), and the world event responsible (`production_id`, `shipment_id` or `package_id`). `delivered` and `customer_order_id` are history: goods shipped straight to a customer before they went by post (1.2) |
+| `game.stock.entry` | append-only ledger: `date`, `product_id`, signed `qty`, `kind` (`genesis` / `manufactured` / `consumed` / `received` / `packed` / `unpacked`), and the world event responsible (`production_id`, `shipment_id` or `package_id`) |
 | `game.stock` | one row per product: `qty`, with `CHECK (qty >= 0)` |
 
 Without locations (§14), `game.stock` is what is **on the shelves**. Goods
@@ -109,8 +109,7 @@ run that ended at 14:00 and was settled by a cron at 14:07 happened at 14:00.
 ### 3.3 Genesis
 
 A world is created on a database that may already hold stock. On install
-(`post_init_hook`), and on upgrade from 1.0 (`migrations/1.1/`),
-`game.world._genesis()` copies the positive internal-location quants in as
+(`post_init_hook`), `game.world._genesis()` copies the positive internal-location quants in as
 `genesis` entries. That is the one moment Odoo is taken at its word, so Odoo
 and the world agree at the start, and every later difference is one the game
 caused. It does nothing once the ledger has any entry.
@@ -415,14 +414,13 @@ against.
 
 ### 8.4 Opening
 
-On install (`post_init_hook`) and on upgrade to 1.2 (`migrations/1.2/`), the
-company's account is opened **empty**. Unlike stock (§3.3), Odoo's bank
-balance is not taken at its word: money is the score, and the score starts
-from what the game gives. Scenarios give their actors their starting money with
-`<function model="game.bank.account" name="_open">`, which deposits only into
-an account that has never moved. So it can sit outside `noupdate`, and a world
-that upgrades into a scenario gets the money too. The company's own starting
-capital, if a scenario wants one, would be the same kind of deposit.
+On install (`post_init_hook`), the company's account is opened **empty**.
+Unlike stock (§3.3), Odoo's bank balance is not taken at its word: money is
+the score, and the score starts from what the game gives. Scenarios give their
+actors their starting money with
+`<function model="game.bank.account" name="_deposit">`, inside `noupdate`, so
+that it runs once, at install. The company's own starting capital, if a
+scenario wants one, would be the same kind of deposit.
 
 ## 9. Time: settling what is due
 
@@ -549,16 +547,17 @@ at install:
 | **Binder & Co.**, a contact at 12 Clip Lane, Springfield, OR 97477, United States; Paperclip sells at 0.05 plus the default sales tax; the administrator gets the address `you@paperclips.example.com` if they have none | customer: 200 paperclips an order, at most **0.08 each, taxes included**; emails its orders to the administrator; pays 4 game hours after agreeing to an invoice; the post finds it at `Binder & Co. / 12 Clip Lane / Springfield, OR 97477 / United States`, which it gives in its orders; complains 3 game days after paying if its paperclips have not come; orders again a game day after receiving them; **1000 in the bank** |
 
 It enables work orders and units of measure for employees. It starts with no
-stock, and the company with no money: the customer's payments are the first. Everything the player may change is `noupdate`, so upgrading the module
-never undoes their edits to the BoM or the prices.
+stock, and the company with no money: the customer's payments are the first.
+Everything the player may change is `noupdate`, so upgrading the module never
+undoes their edits to the BoM or the prices.
 
 At `--rate 720` a paperclip takes a tenth of a real second, a delivery or a
 package two real minutes, a customer pays twenty real seconds after reading
 its invoice, and complains six real minutes after paying.
 
-The customer's postal address is given by a `<function>` (`_give_address`)
-that fills a blank only, like `_introduce`, so a world upgrading into packages
-gets it too.
+The customer's postal address is on its record, as world data. Its money
+(`_deposit`) and the administrator's address (`_introduce`, which fills a blank
+only) are `<function>`s inside `noupdate`, so they run once, at install.
 
 ## 13. Known issues and risks
 
@@ -572,8 +571,7 @@ gets it too.
   it needs two settles racing on the same row.
 - **A purchase order cancelled after confirmation still ships.** The vendor has
   its copy. Negotiating a cancellation is gameplay for the email era.
-- **Genesis on an upgraded world copies whatever Odoo held**, demo data
-  included.
+- **Genesis copies whatever Odoo held at install**, demo data included.
 - **`Product Unit` precision is 2 decimals.** A recipe needing less than
   0.01 of a unit would round to nothing, and make things for free.
 - **Money only comes in.** The company pays nobody yet: wire is shipped and
@@ -603,9 +601,6 @@ gets it too.
 - **Two customers at one address**: the post delivers to the one created first.
 - **Two packages for one order arriving in concurrent settles** can fail one
   of them with a serialization error, as concurrent settles can (above).
-- **Orders paid before 1.3** waited for a *Ship* button that is gone. The
-  upgrade gives them a `date_chase` from the moment of upgrading, and they wait
-  for a package like any other.
 
 ## 14. Out of scope, and next
 
@@ -629,10 +624,7 @@ gets it too.
 
 ## 15. Testing
 
-```bash
-odoo-bin -d <db> -i odoo_sim_paperclips --test-tags /odoo_sim,/odoo_sim_paperclips --stop-after-init
-cd odoo_sim/ui && npm test
-```
+How to run them: README.md, "Running the tests".
 
 `addons/odoo_sim/tests/test_world.py` builds its own products, recipe, station
 and vendor: the ledger (exact decimals, refusals that leave nothing behind, no
@@ -671,7 +663,9 @@ exactly as the world did, goods and money alike. It compares movements rather th
 and first settles whatever the world already had in flight, because it has to
 pass on a world someone has been playing in (DESIGN.md §8).
 
-Both suites pass on an ordinary database and on a game world.
+Both suites pass on an ordinary database and on a game world, with or
+without a chart of accounts: every test pins a running world of its own, and
+the bank's tests load a chart when the company has none (`tests/common.py`).
 
 The UI tests (`node --test`) cover `describeWorld`, `sync.js` ordering and
 coalescing, and the watcher passing on world notices and resyncing on

@@ -9,13 +9,11 @@ import threading
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-import pytz
-
 from odoo import game_clock
 from odoo.addons.base.models.ir_cron import IrCron
-from odoo.addons.odoo_sim import loop, workday
+from odoo.addons.odoo_sim import loop
 from odoo.game_clock import GameClock
-from odoo.tests.common import BaseCase, TransactionCase
+from odoo.tests.common import TransactionCase
 from odoo.tools import config
 
 _MISSING = object()
@@ -178,35 +176,6 @@ class TestCronTickBookkeeping(TransactionCase):
         self.assertEqual(
             getattr(threading.current_thread(), 'dbname', None), self.env.cr.dbname)
         self.assertIsNone(threading.current_thread().start_time)
-
-
-class TestNextWorkingDay(BaseCase):
-    """Where a forward lands: nine in the morning, in the player's zone."""
-
-    brussels = workday.timezone('Europe/Brussels')
-
-    def test_from_the_evening_it_is_tomorrow_morning(self):
-        # 17:30 in Brussels, which is UTC+1 in March
-        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 16, 30), self.brussels),
-                         datetime(2030, 3, 2, 8, 0))
-
-    def test_from_the_small_hours_it_is_the_same_morning(self):
-        """ Two in the morning is still the night being skipped. """
-        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 1, 0), self.brussels),
-                         datetime(2030, 3, 1, 8, 0))
-
-    def test_at_nine_sharp_it_is_the_next_day(self):
-        self.assertEqual(workday.next_day_start(datetime(2030, 3, 1, 8, 0), self.brussels),
-                         datetime(2030, 3, 2, 8, 0))
-
-    def test_across_a_change_of_clocks(self):
-        """ Nine is nine on the morning summer time starts: an hour earlier in UTC. """
-        self.assertEqual(workday.next_day_start(datetime(2030, 3, 30, 17, 0), self.brussels),
-                         datetime(2030, 3, 31, 7, 0))
-
-    def test_the_first_zone_that_exists_wins(self):
-        self.assertEqual(workday.timezone('Mars/Olympus_Mons', 'Europe/Brussels').zone, 'Europe/Brussels')
-        self.assertIs(workday.timezone(None, False, ''), pytz.utc)
 
 
 class TestForward(TransactionCase):

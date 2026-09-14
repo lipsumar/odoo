@@ -50,13 +50,6 @@ class AccountBankStatementLine(models.Model):
     _game_bank_ref_uniq = models.UniqueIndex('(journal_id, game_bank_ref) WHERE game_bank_ref IS NOT NULL')
 
     @api.model
-    def _game_bank_trigger(self):
-        """ Have the feed run as soon as the loop next polls. """
-        cron = self.env.ref('odoo_sim.ir_cron_bank_feed', raise_if_not_found=False)
-        if cron:
-            cron._trigger()
-
-    @api.model
     def _cron_game_bank_feed(self):
         for account in self.env['game.bank.account'].search([('journal_id', '!=', False)]):
             self._game_bank_import(account)

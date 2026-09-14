@@ -31,7 +31,7 @@ import logging
 import threading
 import time
 import typing
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 if typing.TYPE_CHECKING:
     from odoo.sql_db import BaseCursor
@@ -194,11 +194,6 @@ _COLUMNS = """
 
 _SELECT_CLOCK = f"SELECT {_COLUMNS} FROM public.game_clock"
 
-#: A world created before forwarding existed has no ``forward_to`` until
-#: :func:`upgrade` runs, and reading it must not fail in the meantime: this
-#: read is taken inside other transactions, which an error would abort.
-_SELECT_CLOCK_BEFORE_FORWARDING = _SELECT_CLOCK.replace("forward_to AT TIME ZONE 'UTC'", "NULL")
-
 #: Settle game time up to this instant, then optionally flip ``paused``.
 #: ``last_tick_real`` moves even while paused, so a paused stretch is never
 #: accrued and resuming does not jump.
@@ -275,17 +270,10 @@ def _remember(dbname: str, clock: GameClock | None) -> GameClock | None:
 
 def _read(cr: BaseCursor) -> GameClock | None:
     """ Read the clock of ``cr``'s database, or ``None`` if it is not a world. """
-    cr.execute("""
-        SELECT to_regclass('public.game_clock') IS NOT NULL,
-               EXISTS (SELECT FROM pg_attribute
-                        WHERE attrelid = to_regclass('public.game_clock')
-                          AND attname = 'forward_to'
-                          AND NOT attisdropped)
-    """)
-    exists, forwardable = cr.fetchone()
-    if not exists:
+    cr.execute("SELECT to_regclass('public.game_clock')")
+    if cr.fetchone()[0] is None:
         return None
-    cr.execute(_SELECT_CLOCK if forwardable else _SELECT_CLOCK_BEFORE_FORWARDING)
+    cr.execute(_SELECT_CLOCK)
     row = cr.fetchone()
     return GameClock(*row) if row else None
 
@@ -485,20 +473,6 @@ def is_running(clock: GameClock | None, real: datetime | None = None) -> bool:
     return is_ticking(clock, real)
 
 
-def upgrade(cr: BaseCursor) -> None:
-    """ Bring an existing world's clock up to this code: idempotent.
-
-    Adds ``forward_to`` to a world created before forwarding, and regenerates
-    ``public.now()`` so that raw SQL stands still while forwarding too.  Does
-    nothing on a database that is not a world.
-    """
-    cr.execute("SELECT to_regclass('public.game_clock')")
-    if cr.fetchone()[0] is None:
-        return
-    cr.execute("ALTER TABLE public.game_clock ADD COLUMN IF NOT EXISTS forward_to timestamptz")
-    cr.execute(GameClock.sql_function())
-
-
 def install(
     cr: BaseCursor,
     game_now: datetime,
@@ -526,8 +500,7 @@ def install(
             forward_to     timestamptz
         )
     """)
-    # A world being re-created with --force may predate forward_to.
-    upgrade(cr)
+    cr.execute(GameClock.sql_function())
     cr.execute("DELETE FROM public.game_clock")
     cr.execute("""
         INSERT INTO public.game_clock (game_now, last_tick_real, rate, paused, max_gap)

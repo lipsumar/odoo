@@ -430,10 +430,6 @@ Details that matter:
   ever carry it out.
 - **A crash mid-forward** leaves `forward_to` set and the world frozen at the
   last step. The next `game_run` carries on from there.
-- **Worlds from before forwarding** get the column from `game_clock.upgrade`,
-  run by `game_run` at startup and by `install`. Until then `_read` selects
-  `NULL` for it, because the read runs inside other transactions and an error
-  would abort them.
 - **Interval crons run at every occurrence** during a forward, since the
   forward steps onto each `nextcall`. §5.2's collapse does not apply. It costs
   one step a game hour for Odoo's hourly crons.
@@ -546,9 +542,9 @@ same flag so it cannot fire a cron behind the game's back.
 
 The command lives in the game addon as `cli/game_run.py`, not in core:
 `load_addons_commands` (`odoo/cli/command.py:68-85`) globs the addons path for
-`*/cli/<command>.py`, so this needs **no upstream diff at all**. (`sim_init`
-stays in core, because it runs against a database before the game addon
-exists; `game_run` needs the addon anyway.)
+`*/cli/<command>.py`, so this needs **no upstream diff at all**. `sim_init` and
+`sim_pause` live beside it: none of the three needs the module installed, only
+its directory on the addons path.
 
 It bootstraps with the serving form, `server.start(preload=[db])` *without*
 `stop=True` — `stop=True` is the `odoo-bin shell` form, which returns before
@@ -826,17 +822,16 @@ proves too costly.
    the rate between runs no longer rewinds the world.
 
 9. **Done.** §3.4's forward: `forward_to` and its primitives
-   (`start_forward`, `step_forward`, `finish_forward`, `is_ticking`,
-   `upgrade`) in `game_clock.py`, the stepping in `loop.py`, the day in
-   `workday.py`, and the pause and forward endpoints behind the page's time
-   bar.
+   (`start_forward`, `step_forward`, `finish_forward`, `is_ticking`) in
+   `game_clock.py`, the stepping in `loop.py`, the day in `workday.py`, and
+   the pause and forward endpoints behind the page's time bar.
 
 With 3, 7 and 8 built, what remains is 4 (§5.3's deactivation threshold) and
 5 and 6, all driven by observed behaviour rather than worth doing
 speculatively — now widened by §5.12, which says what shape to look for.
 
-**Test coverage:** 32 tests on the clock and `sim_init`, 18 on the loop and
-the pulse (§8). What remains uncovered is the **threading itself** — tick
+**Test coverage:** the clock, `sim_init`, the loop and the pulse (§8). What
+remains uncovered is the **threading itself** — tick
 cadence, the `select`/`LISTEN` wiring, and the bootstrap in `game_run.run()`.
 A clock thread that stalled or drifted would still emit well-formed pulses and
 pass everything, so a client's lock is currently the only check that the loop
@@ -844,7 +839,7 @@ keeps time. Worth a harness if the threads grow any logic beyond "call this
 every N seconds".
 
 Code as built: `odoo/game_clock.py` (the clock, the per-database cache and
-`install()`), `odoo/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
+`install()`), `addons/odoo_sim/cli/sim_init.py`, and edits to `odoo/sql_db.py`,
 `odoo/tests/test_cursor.py`, `odoo/orm/fields_temporal.py` and
 `odoo/addons/base/models/ir_cron.py` — 36 inserted lines across the five
 existing files. `MAIL.md` §3 adds one more: a guard in
@@ -858,16 +853,12 @@ wraps it with its own `freeze_time` class supporting test-class decoration.
 `ODOO_FAKETIME_TEST_MODE` provides a working reference implementation of the
 SQL-side override to model ours on.
 
-Built, in `odoo/addons/base/tests/test_game_clock.py` (27 tests, registered in
-`odoo/addons/base/tests/__init__.py`):
+Built, in `odoo/addons/base/tests/test_game_clock.py` (registered in
+`odoo/addons/base/tests/__init__.py`) and in `addons/odoo_sim/tests/`. How to
+run them: README.md, "Running the tests".
 
-```bash
-odoo-bin -d <db> --test-tags /base:TestGameClockMath,/base:TestGameClockDatabase,/base:TestGameClockCron --stop-after-init
-odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim --stop-after-init
-```
-
-The suite is run against **both** an ordinary database and one that is itself a
-game world, for the reason in the last bullet below.
+The suites are run against **both** an ordinary database and one that is
+itself a game world, for the reasons in the last two bullets below.
 
 - `TestGameClockMath` — the mapping itself under `freeze_time`, at
   `K ∈ {0.5, 1, 60, 1000}`: the multiplier, game offsets, monotonicity, and
@@ -882,7 +873,7 @@ game world, for the reason in the last bullet below.
   accrue the paused stretch on resume.
 - `TestGameClockCron` — readiness on game time at `K = 3600`, a regression
   test for §5.1, and one for §5.8's `thread.dbname` deletion.
-- `TestSimInitStartingInstant` — which instant a world is created at, and
+- `TestSimInitStartingInstant` (in `addons/odoo_sim/tests/test_cli.py`) — which instant a world is created at, and
   above all that `--force` carries an existing world's instant across instead
   of rewinding it to the present (§7-8).
 - `TestWorldPulse` (in `addons/odoo_sim/tests/`) — that a pulse carries a
@@ -894,8 +885,8 @@ game world, for the reason in the last bullet below.
   still, is not running and is still ticking, and that an older reading never
   replaces a newer one in the cache; in `TestGameClockDatabase`, that SQL
   stands still too, that only a step moves it (never back, never past the
-  target), once at a time, that a pause survives it, and that a world from
-  before forwarding is read and then upgraded. In `addons/odoo_sim/tests/`,
+  target), once at a time, and that a pause survives it. In
+  `addons/odoo_sim/tests/`,
   `TestForward` runs a whole night through the loop in the test's
   transaction: an event at 23:00 happens at 23:00, the one it schedules two
   hours on at 01:00, one due after the morning does not happen, and a job that
@@ -939,6 +930,12 @@ Three things learned writing them:
   cursor's SQL fallback skips on a world, because `search_path` sends even that
   fallback through `public.now()` (`sql_db.py:383-390`). The suite is run both
   ways.
+- **Nor may a test assume that its database *is* a world, or that it has a
+  chart of accounts.** The game's suites once passed only on a played world:
+  mail reached the world's post only where there was a clock, and the bank's
+  tests used a journal someone else had made. Every test in
+  `addons/odoo_sim/tests/` now pins a running world of its own and makes what
+  it needs (`tests/common.py`), and the suites are run on a new database too.
 
 ## 9. Decisions
 

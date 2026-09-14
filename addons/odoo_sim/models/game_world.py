@@ -6,7 +6,7 @@ See ``odoo_sim/GAME_STATE.md`` sections 3.3, 9 and 10.
 from odoo import api, fields, models
 from odoo.tools import SQL
 
-from odoo.addons.odoo_sim import pulse
+from odoo.addons.odoo_sim import pulse, utils
 from odoo.addons.odoo_sim.models.game_post import SENT_STATES
 
 #: Bus notification type saying "the world changed; fetch it again".  Rides the
@@ -16,18 +16,13 @@ from odoo.addons.odoo_sim.models.game_post import SENT_STATES
 CHANGED = 'odoo_sim.world_changed'
 
 #: Manufacturing orders a workstation offers to link a run to.
-OPEN_MO_STATES = ('confirmed', 'progress', 'to_close')
+LINKABLE_MO_STATES = ('confirmed', 'progress', 'to_close')
 
 #: How many of the company's bank transactions the page shows.
 BANK_LINES = 10
 
 #: How many of the packages the company has sent the page shows.
 SENT_PACKAGES = 10
-
-
-def _instant(value):
-    """ Naive UTC ISO, as ``pulse.payload`` sends datetimes (see its docstring). """
-    return value.isoformat() if value else None
 
 
 class GameWorld(models.AbstractModel):
@@ -79,7 +74,6 @@ class GameWorld(models.AbstractModel):
         leaving._leave_unpaid()
         if runs or shipments or tasks or invoices or packages or returned or chased or asking or leaving:
             self._changed()
-        return runs, shipments, tasks, invoices, packages, returned, chased, asking, leaving
 
     def _lock_due(self, model, state, date_field, now):
         records = self.env[model]
@@ -99,15 +93,8 @@ class GameWorld(models.AbstractModel):
 
     @api.model
     def _schedule_settle(self, at):
-        """ Have the settle cron run at game instant ``at``.
-
-        A future trigger does not wake the loop (``ir_cron._trigger_list`` only
-        notifies for triggers already due), so it is picked up by the loop's
-        next poll: settling lags ``at`` by at most one cron tick.
-        """
-        cron = self.env.ref('odoo_sim.ir_cron_world_settle', raise_if_not_found=False)
-        if cron:
-            cron._trigger(at)
+        """ Have the settle cron run at the game instant ``at``, or at each of several. """
+        utils.trigger(self.env, 'odoo_sim.ir_cron_world_settle', at)
 
     @api.model
     def _changed(self):
@@ -155,8 +142,8 @@ class GameWorld(models.AbstractModel):
         """ The whole world, as ``GET /game/api/world`` hands it to the page:
         what exists, the workstations, deliveries on their way, the company's
         bank account, what customers have on order, the packages on the
-        bench and sent, the jobs the company can hire for, and its employees.  A sent package says nothing of where it is: the post
-        has no tracking.
+        bench and sent, the jobs the company can hire for, and its employees.
+        A sent package says nothing of where it is: the post has no tracking.
 
         One projection for one screen (UI_DESIGN.md 9.4), not a generic read.
         Datetimes are naive UTC ISO, exactly as in the pulse, so the page
@@ -208,8 +195,8 @@ class GameWorld(models.AbstractModel):
             return {
                 'id': record.id,
                 'qty': record.qty,
-                'date_start': _instant(record.date_start),
-                'date_end': _instant(record.date_end),
+                'date_start': utils.instant(record.date_start),
+                'date_end': utils.instant(record.date_end),
                 'order': {'id': record.production_id.id, 'name': record.production_id.name}
                 if record.production_id else None,
                 'worker': worker(run_id=record),
@@ -225,7 +212,7 @@ class GameWorld(models.AbstractModel):
                 'qty': record.qty,
                 'state': record.state,
                 'reason': record.reason or None,
-                'date_due': _instant(record.date_due),
+                'date_due': utils.instant(record.date_due),
             }
 
         def package(record):
@@ -234,7 +221,7 @@ class GameWorld(models.AbstractModel):
                 'name': record.display_name,
                 'address': record.address or None,
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in record.line_ids],
-                'date_posted': _instant(record.date_posted),
+                'date_posted': utils.instant(record.date_posted),
                 'worker': worker(package_id=record),
             }
 
@@ -243,7 +230,7 @@ class GameWorld(models.AbstractModel):
             other = record.payer_id if incoming else record.payee_id
             return {
                 'id': record.id,
-                'date': _instant(record.date),
+                'date': utils.instant(record.date),
                 'amount': record.amount if incoming else -record.amount,
                 'counterparty': other.partner_id.display_name if other else None,
                 'reference': record.reference or None,
@@ -251,7 +238,7 @@ class GameWorld(models.AbstractModel):
 
         orders = self.env['mrp.production'].search([
             ('product_id', 'in', workstations.product_id.ids),
-            ('state', 'in', OPEN_MO_STATES),
+            ('state', 'in', LINKABLE_MO_STATES),
         ], order='date_start, id')
 
         snapshot = {
@@ -279,8 +266,8 @@ class GameWorld(models.AbstractModel):
                 'vendor': shipment.vendor_id.partner_id.display_name,
                 'order': shipment.purchase_id.name or None,
                 'state': shipment.state,
-                'date_shipped': _instant(shipment.date_shipped),
-                'date_arrival': _instant(shipment.date_arrival),
+                'date_shipped': utils.instant(shipment.date_shipped),
+                'date_arrival': utils.instant(shipment.date_arrival),
                 'lines': [dict(product(line.product_id), qty=line.qty) for line in shipment.line_ids],
                 'worker': worker(shipment_id=shipment),
             } for shipment in shipments],
@@ -298,7 +285,7 @@ class GameWorld(models.AbstractModel):
                 'max_price': order.max_price,
                 'currency': order.currency_id.name,
                 'state': order.state,
-                'date_requested': _instant(order.date_requested),
+                'date_requested': utils.instant(order.date_requested),
                 'qty_paid': order.qty_paid,
                 'amount_paid': order.amount_paid,
                 # The newest: game.customer.invoice is ordered newest first.
@@ -307,13 +294,13 @@ class GameWorld(models.AbstractModel):
             'packages': [dict(
                 package(record),
                 returned=(record.return_reason or None) if record.date_returned else None,
-                date_returned=_instant(record.date_returned),
+                date_returned=utils.instant(record.date_returned),
             ) for record in on_the_bench],
             'sent_packages': [package(record) for record in sent],
             'jobs': [{
                 'id': job.id, 'name': job.name, 'wage': job.wage, 'currency': job.currency_id.name,
             } for job in jobs],
-            'employees': [employee._shown(now, _instant) for employee in employees],
+            'employees': [employee._shown(now) for employee in employees],
         }
         if user is not None:
             snapshot['mail'] = self.env['game.email']._mailbox(user)

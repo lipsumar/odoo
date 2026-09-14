@@ -1,6 +1,8 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 from odoo import models
 
+from odoo.addons.odoo_sim import utils
+
 
 class PurchaseOrder(models.Model):
     _inherit = 'purchase.order'
@@ -15,7 +17,6 @@ class PurchaseOrder(models.Model):
         wakes it and says nothing about which.
         """
         result = super().button_approve(force=force)
-        cron = self.env.ref('odoo_sim.ir_cron_vendor_agent', raise_if_not_found=False)
-        if cron and self.filtered(lambda order: order.state == 'purchase'):
-            cron._trigger()
+        if self.filtered(lambda order: order.state == 'purchase'):
+            utils.trigger(self.env, 'odoo_sim.ir_cron_vendor_agent')
         return result

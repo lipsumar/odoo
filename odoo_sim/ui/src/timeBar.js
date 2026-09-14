@@ -4,9 +4,9 @@
  * (DESIGN.md 3.4) -- plus the veil over the rest of the page while a forward
  * is under way.
  *
- * `describe` is the whole of the decision and touches no DOM, so the tests
- * can check what a reading looks like without a browser; `createView` only
- * writes its answer into elements.
+ * `describeTimeBar` is the whole of the decision and touches no DOM, so the
+ * tests can check what a reading looks like without a browser; `createTimeBar`
+ * only writes its answer into elements.
  */
 
 /**
@@ -50,7 +50,7 @@ const LINKS = {
  * the keys of actions in flight; `clock:pause` and `clock:forward` are the
  * bar's own.  `forwarding` is the veil's text, or null for no veil.
  */
-export function describe({ reading, link, pending = new Set() }, formats) {
+export function describeTimeBar({ reading, link, pending = new Set() }, formats) {
     const shown = {
         time: '--:--:--',
         date: '',
@@ -103,7 +103,7 @@ export function describe({ reading, link, pending = new Set() }, formats) {
  * `actions.pause(paused)` and `actions.forward()` are called when the player
  * presses a button.
  */
-export function createView(root, veil, actions, formats = localFormats()) {
+export function createTimeBar(root, veil, actions, formats = localFormats()) {
     const time = document.createElement('time');
     time.className = 'clock-time';
     const date = document.createElement('span');
@@ -142,7 +142,7 @@ export function createView(root, veil, actions, formats = localFormats()) {
     veil.replaceChildren(veilText);
 
     return function render(state) {
-        const shown = describe(state, formats);
+        const shown = describeTimeBar(state, formats);
         time.textContent = shown.time;
         time.dateTime = shown.datetime;
         date.textContent = shown.date;

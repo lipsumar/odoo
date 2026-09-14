@@ -303,17 +303,14 @@ never paid, a worker leaves on the 15th of next month.
 
 ## 12. Testing
 
-```bash
-odoo-bin -d <db> -u odoo_sim --test-tags /odoo_sim,/odoo_sim_paperclips --stop-after-init
-cd odoo_sim/ui && npm test
-```
+How to run them: README.md, "Running the tests".
 
 `addons/odoo_sim/tests/test_employee.py`. Time is never frozen, so a test
 that needs someone at work hires them in a time zone where it is ten o'clock
 now (`zone_at`). Orders and transfers are dated in the year 2000, so that a
 played world's older work does not come first.
 
-- `TestWorkingTime`: straight through, stopping at five, beginning at night,
+- `TestWorkingTime` (in `test_workday.py`): straight through, stopping at five, beginning at night,
   ending at five, days of work, a change of clocks, who is at work.
 - `TestHiring`: a user of their own, two different people, the wage agreed,
   the cron woken, no ORM write access.

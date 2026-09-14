@@ -2,10 +2,10 @@
 """Tests for employees: hiring, their working day, the work they take on, and
 their pay (EMPLOYEES.md).
 
-As everywhere in this suite, time is never frozen (see test_world).  An
-employee only works from nine to five, so a test that needs one at work hires
-them in a time zone where it is ten o'clock now (``zone_at``), and settles as
-of instants relative to the task under test.
+As everywhere in this suite, time is never frozen (see common).  An employee
+only works from nine to five, so a test that needs one at work hires them in a
+time zone where it is ten o'clock now (``zone_at``), and settles as of instants
+relative to the task under test.
 
 The work an employee takes on is whatever Odoo says is ready, oldest first.
 On a database someone has been playing in there may be older work about, so
@@ -13,70 +13,15 @@ the orders and transfers made here are dated in the year 2000.
 """
 from datetime import date, datetime, time, timedelta
 
-import pytz
-
-from odoo import Command, fields, game_clock
+from odoo import Command, fields
 from odoo.exceptions import AccessError
-from odoo.game_clock import GameClock
 from odoo.tests import new_test_user, tagged
-from odoo.tests.common import HttpCase, TransactionCase
+from odoo.tests.common import HttpCase
 
 from odoo.addons.odoo_sim import workday
-from odoo.addons.odoo_sim.tests.test_customer import CustomerCase
+from odoo.addons.odoo_sim.tests.common import CustomerCase, zone_at
 
 LONG_AGO = datetime(2000, 1, 1)
-
-
-def zone_at(hour):
-    """ A time zone in which it is ``hour`` o'clock (and some minutes) now. """
-    offset = (hour - fields.Datetime.now().hour) % 24
-    if offset > 12:
-        offset -= 24
-    # The signs of Etc/GMT zones are the other way round: Etc/GMT-3 is UTC+3.
-    return pytz.timezone(f"Etc/GMT{-offset:+d}") if offset else pytz.utc
-
-
-class TestWorkingTime(TransactionCase):
-
-    tz = pytz.timezone('Europe/Brussels')
-
-    def local(self, *args):
-        """ A naive UTC instant, given as local time in Brussels. """
-        return workday.at(date(*args[:3]), time(*args[3:]), self.tz)
-
-    def test_work_inside_the_day_goes_straight_through(self):
-        end = workday.add_working_time(self.local(2030, 3, 4, 9, 30), timedelta(hours=1), self.tz)
-        self.assertEqual(end, self.local(2030, 3, 4, 10, 30))
-
-    def test_work_stops_at_five_and_carries_on_at_nine(self):
-        end = workday.add_working_time(self.local(2030, 3, 4, 15, 0), timedelta(hours=4), self.tz)
-        self.assertEqual(end, self.local(2030, 3, 5, 11, 0))
-
-    def test_work_that_ends_at_five_ends_that_day(self):
-        end = workday.add_working_time(self.local(2030, 3, 4, 16, 0), timedelta(hours=1), self.tz)
-        self.assertEqual(end, self.local(2030, 3, 4, 17, 0))
-
-    def test_work_begun_out_of_hours_starts_the_next_morning(self):
-        for start in (self.local(2030, 3, 4, 20, 0), self.local(2030, 3, 5, 6, 0)):
-            with self.subTest(start=start):
-                end = workday.add_working_time(start, timedelta(minutes=30), self.tz)
-                self.assertEqual(end, self.local(2030, 3, 5, 9, 30))
-
-    def test_long_work_takes_days(self):
-        end = workday.add_working_time(self.local(2030, 3, 4, 9, 0), timedelta(hours=20), self.tz)
-        self.assertEqual(end, self.local(2030, 3, 6, 13, 0))
-
-    def test_across_a_change_of_clocks(self):
-        """ Brussels goes to summer time in the night of 30 to 31 March 2030. """
-        end = workday.add_working_time(self.local(2030, 3, 30, 16, 0), timedelta(hours=2), self.tz)
-        self.assertEqual(end, self.local(2030, 3, 31, 10, 0))
-        self.assertEqual(end, datetime(2030, 3, 31, 8, 0), "10:00 in summer time is 08:00 UTC")
-
-    def test_who_is_at_work(self):
-        self.assertTrue(workday.is_working(self.local(2030, 3, 4, 9, 0), self.tz))
-        self.assertTrue(workday.is_working(self.local(2030, 3, 4, 16, 59), self.tz))
-        self.assertFalse(workday.is_working(self.local(2030, 3, 4, 17, 0), self.tz))
-        self.assertFalse(workday.is_working(self.local(2030, 3, 4, 8, 59), self.tz))
 
 
 class EmployeeCase(CustomerCase):
@@ -516,13 +461,7 @@ class TestEmployeeApi(EmployeeCase, HttpCase):
 
     def setUp(self):
         super().setUp()
-        self.addCleanup(game_clock.invalidate, self.env.cr.dbname)
-        self.world_running()
         self.authenticate('admin', 'admin')
-
-    def world_running(self, paused=False):
-        now = datetime.now()
-        game_clock.override(self.env.cr.dbname, GameClock(now, now, 1.0, paused, timedelta(hours=1)))
 
     def hire_url(self, job, body=None):
         return self.url_open(f'/game/api/jobs/{job}/hire', json=body or {}, method='POST')
@@ -538,7 +477,7 @@ class TestEmployeeApi(EmployeeCase, HttpCase):
 
     def test_nobody_is_hired_in_a_paused_world_or_for_no_job(self):
         self.assertEqual(self.hire_url(999999999).status_code, 404)
-        self.world_running(paused=True)
+        self.world_at(paused=True)
         response = self.hire_url(self.job.id)
         self.assertEqual(response.status_code, 422)
         self.assertIn("not running", response.json()['message'])

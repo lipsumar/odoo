@@ -20,10 +20,10 @@ DAY_START = time(9, 0)
 DAY_END = time(17, 0)
 
 
-def timezone(*names: str | None) -> pytz.BaseTzInfo:
-    """ Return the first of ``names`` that is a time zone, or UTC. """
+def timezone(*names: object) -> pytz.BaseTzInfo:
+    """ Return the first of ``names`` that names a time zone, or UTC.  Anything but a string is skipped. """
     for name in names:
-        if name in pytz.all_timezones_set:
+        if isinstance(name, str) and name in pytz.all_timezones_set:
             return pytz.timezone(name)
     return pytz.utc
 

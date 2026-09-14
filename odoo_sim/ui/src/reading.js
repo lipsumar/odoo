@@ -39,7 +39,7 @@ export function parseInstant(text) {
 /**
  * Read a payload into what the page shows.
  *
- * Only what milestone 1 displays.  The rest of the payload -- `last_tick_real`,
+ * Only what the page displays.  The rest of the payload -- `last_tick_real`,
  * `max_gap`, `server_real_now` -- is what an interpolating clock will need
  * (UI_DESIGN.md 7), and is left alone until something uses it.
  */

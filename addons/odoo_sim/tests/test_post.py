@@ -1,20 +1,16 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """Tests for the post: packing, sending, arriving or coming back, and customers
 waiting for their goods (GAME_STATE.md 7.4 and 7.5).
-
-As in test_customer, time is never frozen: settling is given an instant
-relative to the package or order under test.
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from odoo import Command, game_clock
+from odoo import Command
 from odoo.exceptions import AccessError
-from odoo.game_clock import GameClock
 from odoo.tests import new_test_user, tagged
 from odoo.tests.common import HttpCase
 
 from odoo.addons.odoo_sim.models.game_post import address_words
-from odoo.addons.odoo_sim.tests.test_customer import CustomerCase
+from odoo.addons.odoo_sim.tests.common import CustomerCase
 
 
 class PostCase(CustomerCase):
@@ -378,17 +374,11 @@ class TestPostSnapshot(PostCase):
 
 @tagged('-at_install', 'post_install')
 class TestPostApi(PostCase, HttpCase):
-    """Packing and sending over real HTTP, with the clock pinned as in test_world's TestWorldApi."""
+    """Packing and sending over real HTTP."""
 
     def setUp(self):
         super().setUp()
-        self.addCleanup(game_clock.invalidate, self.env.cr.dbname)
-        self.world_running()
         self.authenticate('admin', 'admin')
-
-    def world_running(self, paused=False):
-        now = datetime.now()
-        game_clock.override(self.env.cr.dbname, GameClock(now, now, 1.0, paused, timedelta(hours=1)))
 
     def call(self, url, body=None):
         return self.url_open(url, json=body or {}, method='POST')
@@ -443,7 +433,7 @@ class TestPostApi(PostCase, HttpCase):
         self.assertEqual(self.on_hand(self.clip), 10)
 
     def test_nothing_is_packed_in_a_paused_world(self):
-        self.world_running(paused=True)
+        self.world_at(paused=True)
         before = self.Package.search_count([])
         response = self.call('/game/api/packages')
 

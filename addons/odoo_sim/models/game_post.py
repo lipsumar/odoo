@@ -15,6 +15,8 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import SQL, float_is_zero, float_round
 
+from odoo.addons.odoo_sim import utils
+
 #: Game hours the post takes to carry a package, and to carry one back.
 TRANSIT_HOURS = 24.0
 
@@ -32,10 +34,6 @@ def address_words(text):
     lane"``, and ``"12 Clip Ln"`` is somewhere else.
     """
     return ' '.join(re.findall(r'[^\W_]+', (text or '').casefold()))
-
-
-def _qty(value):
-    return f"{value:g}"
 
 
 class GamePackage(models.Model):
@@ -198,4 +196,4 @@ class GamePackageLine(models.Model):
 
     def _compute_display_name(self):
         for line in self:
-            line.display_name = f"{_qty(line.qty)} {line.uom_id.name} {line.product_id.display_name}"
+            line.display_name = f"{utils.quantity(line.qty)} {line.uom_id.name} {line.product_id.display_name}"

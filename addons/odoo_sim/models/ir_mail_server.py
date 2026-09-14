@@ -13,7 +13,7 @@ have this module installed.
 from odoo import api, models
 from odoo.exceptions import UserError
 
-from odoo.addons.odoo_sim.models.game_mail import is_world
+from odoo.addons.odoo_sim.utils import is_world
 
 
 class WorldPost:

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, mock, test } from 'node:test';
 
-import { describe } from '../src/view.js';
+import { describeTimeBar } from '../src/timeBar.js';
 import { watchWorld } from '../src/world.js';
 
 const CHANNEL = 'odoo_sim.world';
@@ -158,7 +158,7 @@ test('the page displays the game_now of a pulse', async () => {
     socket.serverOpen();
     socket.serverSend(frame(pulse('2030-03-01T09:30:07.250000')));
 
-    const shown = describe({ reading: readings.at(-1), link: 'live' }, UTC);
+    const shown = describeTimeBar({ reading: readings.at(-1), link: 'live' }, UTC);
     assert.equal(shown.time, '09:30:07');
     // whether a comma follows the weekday depends on the ICU data in use
     assert.match(shown.date, /^Friday,? 1 March 2030$/);
@@ -256,7 +256,7 @@ test('a closed socket and a failed fetch say the server is unreachable', async (
     await settle();
 
     assert.deepEqual(links, ['live', 'reconnecting', 'unreachable']);
-    assert.equal(describe({ reading: readings.at(-1), link: 'unreachable' }, UTC).link.tone, 'fault');
+    assert.equal(describeTimeBar({ reading: readings.at(-1), link: 'unreachable' }, UTC).link.tone, 'fault');
 });
 
 test('a fetch that fails while the socket is up changes nothing', async () => {
@@ -317,7 +317,7 @@ test('a 403 from the fetch is an expired session too', async () => {
 
     assert.deepEqual(links, ['signed-out']);
     assert.ok(socket.closedByClient);
-    assert.equal(describe({ reading: null, link: 'signed-out' }, UTC).link.action.href, '/web/login?redirect=/game');
+    assert.equal(describeTimeBar({ reading: null, link: 'signed-out' }, UTC).link.action.href, '/web/login?redirect=/game');
 });
 
 test('a server whose bus is newer than the page asks for a reload', async () => {
@@ -328,63 +328,4 @@ test('a server whose bus is newer than the page asks for a reload', async () => 
 
     assert.deepEqual(links, ['outdated']);
     assert.equal(sockets.length, 1, 'retrying would only be refused again');
-});
-
-test('paused and stopped are said differently', () => {
-    const reading = (extra) => ({ gameNow: new Date('2030-03-01T09:30:00Z'), rate: 1440, ...extra });
-
-    const paused = describe({ reading: reading({ paused: true, running: false }), link: 'live' }, UTC);
-    assert.equal(paused.world, 'Paused');
-    assert.equal(paused.state, 'paused');
-
-    const stopped = describe({ reading: reading({ paused: false, running: false }), link: 'live' }, UTC);
-    assert.match(stopped.world, /^Stopped/);
-    assert.equal(stopped.state, 'stopped');
-});
-
-test('before any reading there is still something to show', () => {
-    const shown = describe({ reading: null, link: 'connecting' }, UTC);
-    assert.equal(shown.time, '--:--:--');
-    assert.equal(shown.link.text, 'Connecting…');
-    assert.ok(shown.pause.disabled && shown.forward.disabled, 'nothing to act on yet');
-});
-
-// -- the time bar's buttons ---------------------------------------------------
-
-const at = (extra) => ({
-    gameNow: new Date('2030-03-01T17:30:00Z'), rate: 720, paused: false, running: true, forwardTo: null, ...extra,
-});
-
-test('a running world can be paused, or forwarded to the next day', () => {
-    const shown = describe({ reading: at(), link: 'live' }, UTC);
-    assert.deepEqual(shown.pause, { label: 'Pause', paused: true, disabled: false });
-    assert.equal(shown.forward.disabled, false);
-    assert.equal(shown.forwarding, null, 'no veil');
-});
-
-test('a paused world can be resumed, and still forwarded', () => {
-    const shown = describe({ reading: at({ paused: true, running: false }), link: 'live' }, UTC);
-    assert.deepEqual(shown.pause, { label: 'Resume', paused: false, disabled: false });
-    assert.equal(shown.forward.disabled, false);
-});
-
-test('while forwarding, the page says where to and nothing can be pressed', () => {
-    const forwardTo = new Date('2030-03-02T09:00:00Z');
-    const shown = describe({ reading: at({ running: false, forwardTo }), link: 'live' }, UTC);
-    assert.equal(shown.state, 'forwarding');
-    assert.equal(shown.world, 'Forwarding to Saturday 09:00…');
-    assert.equal(shown.forwarding, shown.world, 'the veil is up');
-    assert.ok(shown.pause.disabled && shown.forward.disabled);
-});
-
-test('a stopped world, or a lost session, offers neither', () => {
-    const stopped = describe({ reading: at({ running: false }), link: 'live' }, UTC);
-    assert.ok(stopped.pause.disabled && stopped.forward.disabled);
-    const signedOut = describe({ reading: at(), link: 'signed-out' }, UTC);
-    assert.ok(signedOut.pause.disabled && signedOut.forward.disabled);
-});
-
-test('a press in flight holds both buttons', () => {
-    const shown = describe({ reading: at(), link: 'live', pending: new Set(['clock:forward']) }, UTC);
-    assert.ok(shown.pause.disabled && shown.forward.disabled);
 });

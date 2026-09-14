@@ -15,6 +15,8 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import SQL, format_amount
 
+from odoo.addons.odoo_sim import utils
+
 #: Why money moved.  A deposit brings money into the world from outside it --
 #: a scenario's opening balances -- and has no payer.  A payment moves money
 #: from one account to another, so the sum of all balances is always the sum
@@ -109,27 +111,13 @@ class GameBankAccount(models.Model):
         self.ensure_one()
         self.journal_id = journal
         journal.bank_statements_source = 'game_bank'
-        self.env['account.bank.statement.line']._game_bank_trigger()
+        utils.trigger(self.env, 'odoo_sim.ir_cron_bank_feed')
 
     @api.model
     def _deposit(self, partner_id, amount, reference="Opening balance"):
-        """ Bring ``amount`` into the world, into ``partner_id``'s account. """
+        """ Bring ``amount`` into the world, into ``partner_id``'s account.  Takes an id, as scenario data passes one. """
         account = self._of(self.env['res.partner'].browse(partner_id))
         return self._book(self.browse(), account, amount, reference, 'deposit')
-
-    @api.model
-    def _open(self, partner_id, deposit=0.0, reference="Opening balance"):
-        """ Open ``partner_id``'s account with ``deposit`` in it, once.
-
-        For scenario data, whose ``<function>`` runs on every install and
-        upgrade, so that a world upgrading into a scenario gets its actors'
-        money too: an account that has ever moved is open already, and gets
-        nothing more.  Takes an id, as a ``<function>`` passes one.
-        """
-        account = self._of(self.env['res.partner'].browse(partner_id))
-        if deposit and not account._statement(limit=1):
-            self._book(self.browse(), account, deposit, reference, 'deposit')
-        return account
 
     def _pay(self, payee, amount, reference, *, date=None):
         """ Pay ``amount`` from this account to ``payee``, with ``reference`` as the communication. """
@@ -208,7 +196,7 @@ class GameBankAccount(models.Model):
             'reference': reference,
         })
         if (payer | payee).journal_id:
-            self.env['account.bank.statement.line']._game_bank_trigger()
+            utils.trigger(self.env, 'odoo_sim.ir_cron_bank_feed')
         self.env['game.world']._changed()
         return transaction
 

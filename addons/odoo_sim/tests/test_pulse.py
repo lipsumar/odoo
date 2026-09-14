@@ -4,7 +4,6 @@
 import json
 from datetime import datetime, timedelta
 
-from odoo import game_clock
 from odoo.addons.odoo_sim import pulse
 from odoo.game_clock import GameClock
 from odoo.tests.common import TransactionCase

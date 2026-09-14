@@ -14,8 +14,9 @@
  * rebuilding them -- the form above all, which holds what the player is
  * typing while the page re-renders on every pulse.
  */
+import { element, keyed } from './dom.js';
+import { pageFormats } from './formats.js';
 import { parseInstant } from './reading.js';
-import { element, keyed, worldFormats } from './worldView.js';
 
 const FOLDERS = [
     { key: 'inbox', label: 'Inbox', empty: 'No mail.' },
@@ -132,10 +133,10 @@ function bodyDocument(body) {
         + body;
 }
 
-//: Drawer heights, in pixels: just the handle, and a comfortable default once opened.
+/** Drawer heights, in pixels: just the handle, and a comfortable default once opened. */
 const PEEK_HEIGHT = 52;
 const OPEN_HEIGHT = 420;
-//: Pointer movement, in pixels, below which a press on the handle is a click, not a drag.
+/** Pointer movement, in pixels, below which a press on the handle is a click, not a drag. */
 const DRAG_THRESHOLD = 6;
 
 /**
@@ -144,7 +145,7 @@ const DRAG_THRESHOLD = 6;
  * `actions`: `folder(key)`, `open(emailId)`, `close()`, `write()`, `reply()`,
  * `send({ to, subject, body })`, `discard()`.
  */
-export function createMailView(root, actions, formats = worldFormats()) {
+export function createMailView(root, actions, formats = pageFormats()) {
     const grip = element('span', 'mail-grip');
     const title = element('span', 'mail-title', 'Mail');
     const badge = element('span', 'mail-badge');

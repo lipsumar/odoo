@@ -16,8 +16,6 @@ KINDS = [
     ('manufactured', "Manufactured"),
     ('consumed', "Consumed"),
     ('received', "Received"),
-    # Shipped straight to a customer, before goods went by post (1.2).
-    ('delivered', "Delivered"),
     ('packed', "Packed"),
     ('unpacked', "Unpacked"),
 ]
@@ -147,6 +145,3 @@ class GameStockEntry(models.Model):
         'game.shipment', "Shipment", readonly=True, index='btree_not_null', ondelete='restrict')
     package_id = fields.Many2one(
         'game.package', "Package", readonly=True, index='btree_not_null', ondelete='restrict')
-    # Shipped straight to a customer, before goods went by post (1.2).
-    customer_order_id = fields.Many2one(
-        'game.customer.order', "Customer order", readonly=True, index='btree_not_null', ondelete='restrict')

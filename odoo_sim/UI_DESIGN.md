@@ -25,7 +25,7 @@ Companion to `DESIGN.md` (the game clock), which is assumed throughout.
 > - `odoo/game_clock.py` — the accumulator clock (`DESIGN.md` §3.3), with
 >   `clock_for`, `tick`, `set_paused`, `is_running`, `GameClock.game_at`.
 > - `addons/odoo_sim/` — `loop.py` (clock + cron threads), `pulse.py`,
->   `cli/game_run.py`, `cli/sim_pause.py`, and their tests.
+>   `cli/sim_init.py`, `cli/game_run.py`, `cli/sim_pause.py`, and their tests.
 > - `addons/odoo_sim/controllers/main.py` — `GET /game` renders the page,
 >   `GET /game/api/clock` returns the clock reading.
 > - `addons/odoo_sim/views/index.xml` — the standalone page template, with a
@@ -212,26 +212,38 @@ odoo_sim/
   README.md            how to run a world
   ui/                  the Vite project, its own package.json
     index.html         dev-server page only; the build never reads it
-    src/main.js        entry: wires the blob, the view and the watcher
+    src/main.js        entry: wires the blob, the views and the watcher
     src/reading.js     payload -> reading; the UTC parse
     src/world.js       socket + fetch fallback + reconnect
-    src/view.js        describe() (pure) and the DOM that shows it
+    src/sync.js        the world's state: fetched, and answers applied in order
+    src/timeBar.js     describeTimeBar() (pure) and the DOM that shows it
+    src/worldView.js   describeWorld() (pure) and the world's panels
+    src/mailView.js    describeMail() (pure) and the mail drawer
+    src/dom.js         element() and keyed(), which every view builds with
+    src/formats.js     numbers, times and money in the browser's locale
     test/              node:test, no DOM, no extra dependencies
 
-addons/odoo_sim/       depends: base, bus
+addons/odoo_sim/       depends: bus, mrp, purchase_stock, sale_stock
   loop.py              GameLoop: the clock and cron threads, and the refusals
   pulse.py             CHANNEL / TYPE / payload() / send()
+  workday.py           the working day, and where a forward lands
+  utils.py             what the models share
+  cli/sim_init.py      create a world
   cli/game_run.py      argument parsing + the serving bootstrap
   cli/sim_pause.py     pause / resume
-  controllers/main.py  GET /game  +  GET /game/api/clock
+  controllers/main.py  GET /game, the clock, pausing and forwarding
+  controllers/world.py the world's state and actions (GAME_STATE.md)
+  controllers/mail.py  the player's mail (MAIL.md)
+  models/              the world's own state
   views/index.xml      the standalone page template
   static/dist/         vite build output, served raw (§2.1); gitignored
   tests/
 ```
 
-`game_run` works whether or not the module is *installed* — command discovery
-reads the addons path, not the database. The **UI is the exception**: `/game`
-and `/game/api/clock` are registry routes, so they need `-i odoo_sim`.
+`sim_init`, `game_run` and `sim_pause` work whether or not the module is
+*installed* — command discovery reads the addons path, not the database. The
+**UI is the exception**: `/game` and its API are registry routes, so they need
+`-i odoo_sim`.
 
 ### 5.2 The clock endpoint — built
 
@@ -337,8 +349,8 @@ off.
 
 **Tests:** `npm test`, which is `node --test` with no DOM and no extra
 dependencies. `world.js` takes its `WebSocket` and `fetch` as arguments, and
-`view.js` splits the decision (`describe`, pure) from the DOM writes, so the
-tests drive both by hand.
+each view splits the decision (`describeTimeBar`, `describeWorld`,
+`describeMail`, all pure) from the DOM writes, so the tests drive both by hand.
 
 ### 5.5 Game state — built, see `GAME_STATE.md`
 
@@ -492,8 +504,7 @@ And in `odoo_sim/ui/test/`, all **done**:
 - it backs off, stops on an expired session or an outdated version, and says
   *unreachable* only when the socket and the fetch have both failed.
 
-Run: `odoo-bin -d <db> -i odoo_sim --test-tags /odoo_sim --stop-after-init`,
-and `npm test` in `odoo_sim/ui/`.
+Run: README.md, "Running the tests".
 
 Checked by hand in headless Chrome against a `--rate 1440` world: the clock
 steps about 24 game minutes a second. `sim_pause` shows *Paused* within a tick,

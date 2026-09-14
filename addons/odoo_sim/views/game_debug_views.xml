@@ -33,7 +33,6 @@
             <field name="production_id"/>
             <field name="shipment_id"/>
             <field name="package_id"/>
-            <field name="customer_order_id" optional="hide"/>
         </list>
     </field>
 </record>

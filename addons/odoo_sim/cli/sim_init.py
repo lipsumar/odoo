@@ -1,3 +1,4 @@
+"""``odoo-bin sim_init`` -- make a database a game world, or re-make one."""
 import logging
 import optparse
 import sys
@@ -7,7 +8,7 @@ import odoo.game_clock
 import odoo.sql_db
 import odoo.tools.config
 
-from . import Command
+from odoo.cli import Command
 
 _logger = logging.getLogger(__name__)
 
@@ -84,15 +85,12 @@ class SimInit(Command):
             sys.exit(f"--max-gap must be strictly positive, got {opt.sim_max_gap!r}")
 
         with odoo.sql_db.db_connect(dbname).cursor() as cr:
-            existing = None
-            cr.execute("SELECT to_regclass('public.game_clock')")
-            if cr.fetchone()[0] is not None:
-                existing = odoo.game_clock.clock_for(dbname, cr=cr)
-                if existing is not None and not opt.sim_force:
-                    sys.exit(
-                        f"{dbname} is already a game world (at {existing.game_now} "
-                        f"running at rate {existing.rate}). Use --force to overwrite."
-                    )
+            existing = odoo.game_clock.read(cr)
+            if existing is not None and not opt.sim_force:
+                sys.exit(
+                    f"{dbname} is already a game world (at {existing.game_now} "
+                    f"running at rate {existing.rate}). Use --force to overwrite."
+                )
 
             try:
                 game_now = starting_instant(cr, opt.sim_game_start, existing)

@@ -1,4 +1,11 @@
-from . import test_bank, test_controllers, test_customer, test_loop, test_pulse, test_world
+from . import test_bank
+from . import test_cli
+from . import test_controllers
+from . import test_customer
+from . import test_employee
+from . import test_loop
 from . import test_mail
 from . import test_post
-from . import test_employee
+from . import test_pulse
+from . import test_workday
+from . import test_world

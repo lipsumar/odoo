@@ -9,14 +9,18 @@
 import './style.css';
 import { createMailView } from './mailView.js';
 import { readClock } from './reading.js';
-import { readWorld, syncWorld } from './sync.js';
-import { createView } from './view.js';
+import { readJson, syncWorld } from './sync.js';
+import { createTimeBar } from './timeBar.js';
 import { createWorldView } from './worldView.js';
 import { watchWorld } from './world.js';
 
 // Rendered into the page by `GET /game` (views/index.xml), or by index.html
 // under `npm run dev`.
 const bootstrap = window.odooSim;
+
+// The page shows time in the browser's zone, so the morning a forward lands on,
+// and an employee's nine to five, are as this page shows time.
+const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const state = {
     reading: bootstrap.clock ? readClock(bootstrap.clock) : null,
@@ -37,13 +41,9 @@ const mailRoot = document.createElement('div');
 const veilRoot = document.createElement('div');
 game.replaceChildren(clockRoot, worldRoot, mailRoot, veilRoot);
 
-const renderClock = createView(clockRoot, veilRoot, {
+const renderClock = createTimeBar(clockRoot, veilRoot, {
     pause: (paused) => moveTime('clock:pause', '/game/api/clock/pause', { paused }),
-    forward: () => moveTime('clock:forward', '/game/api/clock/forward', {
-        // The page shows time in the browser's zone, so the morning it lands
-        // on is nine o'clock as this page shows it.
-        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }),
+    forward: () => moveTime('clock:forward', '/game/api/clock/forward', { tz: timeZone }),
 });
 const renderWorld = createWorldView(worldRoot, {
     start: (stationId, { qty, productionId }) => perform(
@@ -69,8 +69,7 @@ const renderWorld = createWorldView(worldRoot, {
     ),
     hire: (jobId) => perform(
         `job:${jobId}`,
-        // Nine to five as this page shows time, as for forwarding.
-        () => send('POST', `/game/api/jobs/${jobId}/hire`, { tz: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+        () => send('POST', `/game/api/jobs/${jobId}/hire`, { tz: timeZone }),
     ),
 });
 
@@ -128,19 +127,27 @@ const sync = syncWorld({
     },
 });
 
-/** Take an action; its button waits, and a refusal is said out loud. */
-async function perform(key, request) {
+const showError = (message) => { state.error = message; };
+const showMailError = (message) => { state.mailUi.error = message; };
+
+/** Do `work` as the action `key`: its button waits, and a refusal goes to `fail`, to be said out loud. */
+async function track(key, work, fail) {
     state.pending.add(key);
-    state.error = null;
+    fail(null);
     render();
     try {
-        await sync.act(request);
+        await work();
     } catch (error) {
-        state.error = error.message;
+        fail(error.message);
     } finally {
         state.pending.delete(key);
         render();
     }
+}
+
+/** Take an action in the world, and show the world it answers with. */
+function perform(key, request) {
+    return track(key, () => sync.act(request), showError);
 }
 
 /**
@@ -148,18 +155,10 @@ async function perform(key, request) {
  * shape, so the bar changes at once; the pulse the server sends with it tells
  * every other page.
  */
-async function moveTime(key, url, body) {
-    state.pending.add(key);
-    state.error = null;
-    render();
-    try {
-        state.reading = readClock(await readWorld(await send('POST', url, body)));
-    } catch (error) {
-        state.error = error.message;
-    } finally {
-        state.pending.delete(key);
-        render();
-    }
+function moveTime(key, url, body) {
+    return track(key, async () => {
+        state.reading = readClock(await readJson(await send('POST', url, body)));
+    }, showError);
 }
 
 // Each form gets a key of its own, so the view knows when to fill it in afresh.
@@ -176,7 +175,7 @@ function compose(values) {
 async function openEmail(emailId) {
     state.mailUi.error = null;
     try {
-        state.mailUi.open = await readWorld(await send('GET', `/game/api/mail/${emailId}`));
+        state.mailUi.open = await readJson(await send('GET', `/game/api/mail/${emailId}`));
     } catch (error) {
         state.mailUi.error = error.message;
     }
@@ -188,20 +187,12 @@ async function openEmail(emailId) {
 }
 
 /** Send what the form holds; the form stays, with the reason, if it is refused. */
-async function sendMail(fields) {
+function sendMail(fields) {
     const parentId = state.mailUi.compose?.parentId ?? null;
-    state.pending.add('mail:send');
-    state.mailUi.error = null;
-    render();
-    try {
+    return track('mail:send', async () => {
         await sync.act(() => send('POST', '/game/api/mail/send', { ...fields, parent_id: parentId }));
         state.mailUi.compose = null;
-    } catch (error) {
-        state.mailUi.error = error.message;
-    } finally {
-        state.pending.delete('mail:send');
-        render();
-    }
+    }, showMailError);
 }
 
 render();

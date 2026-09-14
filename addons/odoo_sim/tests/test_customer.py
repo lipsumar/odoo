@@ -3,113 +3,12 @@
 
 How their goods reach them, by post, and what they say when they do not, is
 ``test_post``.
-
-The test clip is sold without taxes, so an invoice's total is what the tests
-say it is.  Time is never frozen (see test_world): settling is always given an
-instant relative to the record under test.
-
-Customers read their mail: an invoice reaches one by being emailed to it, and
-delivered by the post office.  Under test, ``ir.mail_server._disable_send``
-holds every ``mail.mail`` back, so ``sending()`` lets Odoo send -- into the
-world's post, with a tripwire on SMTP, as in test_mail.
 """
-from contextlib import contextmanager
 from datetime import timedelta
-from unittest.mock import patch
 
 from odoo import Command
-from odoo.addons.base.models.ir_mail_server import IrMail_Server
-from odoo.tests import new_test_user
 
-from odoo.addons.odoo_sim.tests.test_bank import BankCase
-
-
-class CustomerCase(BankCase):
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.clip.taxes_id = False
-        cls.buyer.email = 'buyer@outside.example.com'
-        cls.seller = new_test_user(cls.env, 'seller', groups='base.group_user', email='seller@company.example.com')
-        cls.address = "Test buyer\n1 Test Street\n1000 Testville"
-        cls.customer = cls.env['game.customer'].create({
-            'partner_id': cls.buyer.id,
-            'product_id': cls.clip.id,
-            'qty': 100,
-            'max_price': 0.10,
-            'payment_delay': 4,
-            'interval': 24,
-            'complain_after': 72,
-            'write_to': cls.seller.email,
-            'address': cls.address,
-        })
-        cls.accounts._deposit(cls.buyer.id, 50)
-        cls.Email = cls.env['game.email']
-        cls.Delivery = cls.env['game.email.delivery']
-
-    @contextmanager
-    def sending(self):
-        """ Let Odoo send, which in a world means posting -- and never SMTP. """
-        tripwire = AssertionError("an SMTP connection was attempted")
-        with patch.object(IrMail_Server, '_disable_send', return_value=False), \
-                patch('smtplib.SMTP', side_effect=tripwire), \
-                patch('smtplib.SMTP_SSL', side_effect=tripwire):
-            yield
-
-    def place(self):
-        self.customer._cron_place_orders()
-        return self.customer.order_ids.filtered(lambda o: o.state != 'delivered')
-
-    def invoice(self, qty=100, price=0.08, product=None):
-        """ Post a customer invoice to the buyer, the way the player would. """
-        invoice = self.env['account.move'].create({
-            'move_type': 'out_invoice',
-            'partner_id': self.buyer.id,
-            'invoice_line_ids': [Command.create({
-                'product_id': (product or self.clip).id, 'quantity': qty, 'price_unit': price, 'tax_ids': False,
-            })],
-        })
-        invoice.action_post()
-        return invoice
-
-    def received(self, invoice):
-        return self.env['game.customer.invoice'].search([('invoice_id', '=', invoice.id)])
-
-    def send(self, record, partner=None):
-        """ Email ``record`` to the buyer (or ``partner``), and deliver the post. Returns the email. """
-        with self.sending():
-            message = record.message_post(
-                body="<p>Please find it attached.</p>", partner_ids=(partner or self.buyer).ids,
-                message_type='comment', subtype_xmlid='mail.mt_comment',
-            )
-        self.Delivery._deliver()
-        return self.Email.search([('message_id', '=', message.message_id)])
-
-    def read(self, invoice, partner=None):
-        """ Email ``invoice``, and have the customer read its mail. """
-        self.send(invoice, partner)
-        self.customer._cron_read_mail()
-        return self.received(invoice)
-
-    def written(self, subject):
-        """ What the customer has emailed, with ``subject`` in its subject. """
-        return self.Email.search([('email_from', 'ilike', self.buyer.email), ('subject', 'ilike', subject)])
-
-    def paid_order(self, qty=100):
-        """ An order the customer has asked for, been invoiced and paid for. """
-        order = self.place()
-        received = self.read(self.invoice(qty=qty))
-        self.world._settle(received.date_due)
-        return order
-
-    def post(self, qty, address=None, product=None):
-        """ Pack ``qty`` of the clip (or ``product``) in a new package, and send it to the buyer (or ``address``). """
-        package = self.env['game.package']._new()
-        package._pack(product or self.clip, qty)
-        package._send(self.address if address is None else address)
-        return package
-
+from odoo.addons.odoo_sim.tests.common import CustomerCase
 
 class TestCustomerOrders(CustomerCase):
 

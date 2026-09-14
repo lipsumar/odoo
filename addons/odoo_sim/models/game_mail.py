@@ -21,7 +21,7 @@ from datetime import timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, getaddresses, make_msgid
 
-from odoo import api, fields, game_clock, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools.mail import (
     decode_message_header,
@@ -32,7 +32,7 @@ from odoo.tools.mail import (
     plaintext2html,
 )
 
-from odoo.addons.odoo_sim.models.game_world import _instant
+from odoo.addons.odoo_sim import utils
 
 _logger = logging.getLogger(__name__)
 
@@ -56,11 +56,6 @@ RE_PREFIX = re.compile(r'^\s*re\s*:', re.IGNORECASE)
 #: Characters that take no space.  Odoo's email layout pads its preheader with
 #: them so that a mail client's preview stops after the text; so must ours.
 INVISIBLE = dict.fromkeys(map(ord, '­͏​‌‍⁠﻿'))
-
-
-def is_world(cr):
-    """ Whether ``cr`` is on a game world: a database whose mail never leaves it. """
-    return game_clock.clock_for(cr.dbname, cr) is not None
 
 
 def _text(message):
@@ -159,9 +154,7 @@ class GameEmail(models.Model):
         })
         addresses = list(dict.fromkeys(filter(None, (email_normalize(r) for r in recipients))))
         self.env['game.email.delivery']._address(posted, addresses)
-        cron = self.env.ref('odoo_sim.ir_cron_post_office', raise_if_not_found=False)
-        if cron:
-            cron._trigger()
+        utils.trigger(self.env, 'odoo_sim.ir_cron_post_office')
         if author:
             self.env['game.world']._changed()
         return posted
@@ -280,7 +273,7 @@ class GameEmail(models.Model):
             'to': ', '.join(filter(None, [self.email_to, self.email_cc])),
             'subject': self.subject or '',
             'preview': self.preview or '',
-            'date': _instant(self.date),
+            'date': utils.instant(self.date),
         }
 
     def _visible_to(self, user):
@@ -405,7 +398,7 @@ class GameEmailDelivery(models.Model):
             if not self._deliver(limit=1):
                 return
             self.env.cr.commit()
-        self.env.ref('odoo_sim.ir_cron_post_office')._trigger()
+        utils.trigger(self.env, 'odoo_sim.ir_cron_post_office')
 
     @api.model
     def _deliver(self, limit=None):

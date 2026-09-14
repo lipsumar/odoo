@@ -8,35 +8,7 @@ already holds whatever the player earned (DESIGN.md 8).
 from odoo import Command
 from odoo.exceptions import AccessError
 
-from odoo.addons.odoo_sim.tests.test_world import WorldCase
-
-
-class BankCase(WorldCase):
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.accounts = cls.env['game.bank.account']
-        cls.lines = cls.env['account.bank.statement.line']
-        cls.company_account = cls.accounts._company_account()
-        cls.buyer = cls.env['res.partner'].create({'name': "Test buyer", 'is_company': True})
-        cls.buyer_account = cls.accounts._of(cls.buyer)
-
-    def setUp(self):
-        super().setUp()
-        self.company_start = self.balance(self.company_account)
-
-    def balance(self, account):
-        account.invalidate_recordset(['balance'])
-        return account.balance
-
-    def earned(self):
-        """ How far the company's balance has moved since the test began. """
-        return self.balance(self.company_account) - self.company_start
-
-    def transactions(self, account):
-        return self.env['game.bank.transaction'].search(
-            ['|', ('payer_id', '=', account.id), ('payee_id', '=', account.id)])
+from odoo.addons.odoo_sim.tests.common import BankCase
 
 
 class TestBank(BankCase):
@@ -93,16 +65,6 @@ class TestBank(BankCase):
         self.accounts._deposit(stranger.partner_id.id, 10)
         with self.refused("does not change money"):
             stranger._pay(self.company_account, 5, "foreign")
-
-    def test_opening_an_account_deposits_once(self):
-        """ Scenario data opens accounts on every upgrade; the money arrives once. """
-        for _ in range(2):
-            self.accounts._open(self.buyer.id, 1000)
-
-        self.assertEqual(self.balance(self.buyer_account), 1000)
-        self.buyer_account._pay(self.company_account, 1000, "all of it")
-        self.accounts._open(self.buyer.id, 1000)
-        self.assertEqual(self.balance(self.buyer_account), 0, "an account that has moved is open already")
 
     def test_every_actor_gets_an_account_number(self):
         self.assertRegex(self.buyer_account.number, r'^GB\d{6}$')

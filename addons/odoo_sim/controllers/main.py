@@ -75,16 +75,20 @@ def _built_assets() -> tuple[list[str], list[str]]:
         return [], []
 
 
-def _world_clock() -> game_clock.GameClock:
+def _world_clock(fresh=False) -> game_clock.GameClock:
     """ Return this database's clock, or refuse if it is not a game world.
 
     ``clock_for`` may hand back a reading up to ``CACHE_TTL`` old, and that is
-    fine here on purpose: interpolating from a basis is exact whatever the
-    basis's age (DESIGN.md 3.3), so a one-second-old reading yields the same
-    game time as a fresh one.  What it can delay by up to a second is noticing
-    a pause or a resume, and the pulse corrects that within a tick.
+    fine for a read on purpose: interpolating from a basis is exact whatever
+    the basis's age (DESIGN.md 3.3), so a one-second-old reading yields the
+    same game time as a fresh one.  What it can delay by up to a second is
+    noticing a pause or a resume, and the pulse corrects that within a tick.
+
+    ``fresh`` reads the row itself, for a decision that must see a forward
+    another page started a moment ago.
     """
-    clock = game_clock.clock_for(request.db, request.env.cr)
+    cr = request.env.cr
+    clock = game_clock.read(cr) if fresh else game_clock.clock_for(request.db, cr)
     if clock is None:
         raise werkzeug.exceptions.NotFound(
             f"{request.db} is not a game world. "
@@ -172,7 +176,7 @@ class GameUi(http.Controller):
         if not isinstance(paused, bool):
             raise UserError(env._("Pausing is yes or no."))
         cr = request.env.cr
-        if self._fresh_clock(cr).forwarding:
+        if _world_clock(fresh=True).forwarding:
             raise UserError(env._("The world is moving on to the next day: wait until it gets there."))
         clock = game_clock.set_paused(cr, paused)
         pulse.send(cr, clock)
@@ -193,13 +197,13 @@ class GameUi(http.Controller):
         """
         env = _world().env
         cr = request.env.cr
-        clock = self._fresh_clock(cr)
+        clock = _world_clock(fresh=True)
         if clock.forwarding:
             raise UserError(env._("The world is already moving on to the next day."))
         if not game_clock.is_ticking(clock):
             raise UserError(env._("Nothing is ticking this world, so it cannot move on to the next day."))
         target = workday.next_day_start(
-            clock.now(), workday.timezone(tz if isinstance(tz, str) else None, request.env.user.tz),
+            clock.now(), workday.timezone(tz, request.env.user.tz),
         )
         clock = game_clock.start_forward(cr, target)
         if clock is None:  # another page got there first
@@ -208,15 +212,3 @@ class GameUi(http.Controller):
         # Wake the loop's cron thread now rather than at its next poll.
         cr.postcommit.add(request.env['ir.cron']._notifydb)
         return pulse.payload(clock)
-
-    @staticmethod
-    def _fresh_clock(cr):
-        """ Read this world's clock afresh, or refuse if there is no world.
-
-        Fresh, not :func:`_world_clock`'s cached reading: a forward another
-        page started a moment ago must be seen.
-        """
-        clock = game_clock.read(cr)
-        if clock is None:
-            raise werkzeug.exceptions.NotFound(f"{request.db} is not a game world.")
-        return clock

@@ -21,9 +21,9 @@ from markupsafe import Markup
 
 from odoo import Command, api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import SQL, email_normalize, float_compare, format_amount, format_date
+from odoo.tools import SQL, email_normalize, format_amount, format_date
 
-from odoo.addons.odoo_sim import workday
+from odoo.addons.odoo_sim import utils, workday
 
 _logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ REMIND_EVERY = timedelta(days=7)
 LEAVES_AFTER = timedelta(days=15)
 
 #: Manufacturing orders an employee takes on, once Odoo says they are ready.
-OPEN_MO_STATES = ('confirmed', 'progress')
+WORKABLE_MO_STATES = ('confirmed', 'progress')
 
 #: What an employee may do in Odoo.
 GROUPS = ('base.group_user', 'stock.group_stock_user', 'mrp.group_mrp_user')
@@ -53,10 +53,6 @@ LAST_NAMES = [
     "Adler", "Brooks", "Castro", "Dufour", "Eriksen", "Fischer", "Garcia", "Haddad", "Ivanova",
     "Janssen", "Kowalski", "Lambert", "Moreau", "Novak", "Okafor", "Peeters", "Rossi",
 ]
-
-
-def _qty(value):
-    return f"{value:g}"
 
 
 class GameJob(models.Model):
@@ -241,7 +237,7 @@ class GameEmployee(models.Model):
         Task = self.env['game.employee.task']
         stations = self.env['game.workstation'].search([])
         orders = self.env['mrp.production'].search([
-            ('state', 'in', OPEN_MO_STATES),
+            ('state', 'in', WORKABLE_MO_STATES),
             ('reservation_state', '=', 'assigned'),
             ('product_id', 'in', stations.product_id.ids),
             ('id', 'not in', Task._search([('production_id', '!=', False)]).subselect('production_id')),
@@ -479,8 +475,8 @@ class GameEmployee(models.Model):
 
     # -- what the page shows ---------------------------------------------------
 
-    def _shown(self, now, instant):
-        """ This employee as the page shows them, as of ``now``; ``instant`` formats a datetime. """
+    def _shown(self, now):
+        """ This employee as the page shows them, as of ``now``. """
         self.ensure_one()
         tz = self._timezone()
         task = self.task_ids.filtered(lambda task: task.state == 'working')[:1]
@@ -491,18 +487,18 @@ class GameEmployee(models.Model):
             'job': self.job_id.name,
             'wage': self.wage,
             'currency': self.currency_id.name,
-            'date_start': instant(self.date_start),
+            'date_start': utils.instant(self.date_start),
             # The page's clock moves on between snapshots: it tells "not in
             # yet" from "gone home" with these two.
-            'shift_start': instant(workday.working_start(now, tz)),
-            'shift_end': instant(workday.day_end(now, tz)),
+            'shift_start': utils.instant(workday.working_start(now, tz)),
+            'shift_end': utils.instant(workday.day_end(now, tz)),
             'task': {
                 'text': task.display_name,
-                'date_start': instant(task.date_start),
-                'date_end': instant(task.date_end),
+                'date_start': utils.instant(task.date_start),
+                'date_end': utils.instant(task.date_end),
             } if task else None,
-            'salary_due': instant(workday.at(unpaid[0] + timedelta(days=1), time(0), tz)) if unpaid else None,
-            'date_leave': instant(self.date_leave),
+            'salary_due': utils.instant(workday.at(unpaid[0] + timedelta(days=1), time(0), tz)) if unpaid else None,
+            'date_leave': utils.instant(self.date_leave),
         }
 
 
@@ -552,7 +548,7 @@ class GameEmployeeTask(models.Model):
                 run = task.run_id
                 task.display_name = self.env._(
                     "Making %(qty)s %(product)s for %(order)s",
-                    qty=_qty(run.qty), product=run.product_id.display_name,
+                    qty=utils.quantity(run.qty), product=run.product_id.display_name,
                     order=task.production_id.name or self.env._("an order"))
             elif task.kind == 'receive':
                 task.display_name = self.env._("Unpacking %s", task.shipment_id.display_name)
@@ -604,7 +600,7 @@ class GameEmployeeTask(models.Model):
 
     def _record_manufacture(self):
         order = self.production_id
-        if order.state not in OPEN_MO_STATES + ('to_close',):
+        if order.state not in WORKABLE_MO_STATES + ('to_close',):
             return self.env._("%s is not open in Odoo any more.", order.name or self.env._("The order"))
         qty = self.run_id.product_id.uom_id._compute_quantity(self.run_id.qty, order.product_uom_id)
         order.qty_producing = qty

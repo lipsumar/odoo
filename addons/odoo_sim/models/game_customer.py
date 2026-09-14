@@ -21,15 +21,12 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import SQL, email_normalize, float_compare, float_is_zero, format_amount
 
+from odoo.addons.odoo_sim import utils
+
 _logger = logging.getLogger(__name__)
 
 #: A customer has one order open at a time: it asks again once it has its goods.
 OPEN_STATES = ('requested', 'invoiced', 'paid')
-
-
-def _qty(value):
-    """ 200.0 -> "200", 0.5 -> "0.5": how a person writes a quantity. """
-    return f"{value:g}"
 
 
 class GameCustomer(models.Model):
@@ -87,16 +84,10 @@ class GameCustomer(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         customers = super().create(vals_list)
-        self._trigger_orders()
+        utils.trigger(self.env, 'odoo_sim.ir_cron_customer_orders')
         return customers
 
     # -- asking for goods ------------------------------------------------------
-
-    @api.model
-    def _trigger_orders(self, at=None):
-        cron = self.env.ref('odoo_sim.ir_cron_customer_orders', raise_if_not_found=False)
-        if cron:
-            cron._trigger(at)
 
     @api.model
     def _cron_place_orders(self):
@@ -129,14 +120,14 @@ class GameCustomer(models.Model):
         })
         product, uom = self.product_id.display_name, self.product_id.uom_id.name
         order.email_id = self._write_to_company(
-            self.env._("Order: %(qty)s %(product)s", qty=_qty(self.qty), product=product),
+            self.env._("Order: %(qty)s %(product)s", qty=utils.quantity(self.qty), product=product),
             Markup("<p>%s</p><p>%s</p>%s<p>%s</p>") % (
                 self.env._("Hello,"),
                 self.env._(
                     "We would like %(qty)s %(uom)s of %(product)s, and can pay up to %(price)s per "
                     "%(uom)s, taxes included. Please send us your invoice: we pay by bank transfer, "
                     "and expect the goods once you have our payment.",
-                    qty=_qty(self.qty), uom=uom, product=product,
+                    qty=utils.quantity(self.qty), uom=uom, product=product,
                     price=format_amount(self.env, self.max_price, self.currency_id),
                 ),
                 self._ship_to(),
@@ -189,22 +180,14 @@ class GameCustomer(models.Model):
     def _introduce(self, customer_id, user_id, address):
         """ Have ``customer_id`` write to ``user_id``, giving them ``address`` if they have none.
 
-        For scenario data, whose ``<function>`` runs on every install and
-        upgrade: it only fills in what is blank, so a player's own address and
-        a customer's own contact are never overwritten.
+        For scenario data.  It only fills in what is blank, so a player's own
+        address and a customer's own contact are never overwritten.
         """
         customer, user = self.browse(customer_id), self.env['res.users'].browse(user_id)
         if not user.email:
             user.email = address
         if not customer.write_to:
             customer.write_to = user.email
-
-    @api.model
-    def _give_address(self, customer_id, address):
-        """ Give ``customer_id`` the postal ``address`` if it has none: for scenario data, as ``_introduce``. """
-        customer = self.browse(customer_id)
-        if not customer.address:
-            customer.address = address
 
     # -- receiving goods -------------------------------------------------------
 
@@ -228,12 +211,6 @@ class GameCustomer(models.Model):
         self.env['game.world']._changed()
 
     # -- reading invoices ------------------------------------------------------
-
-    @api.model
-    def _trigger_mail(self):
-        cron = self.env.ref('odoo_sim.ir_cron_customer_mail', raise_if_not_found=False)
-        if cron:
-            cron._trigger()
 
     def _mailboxes(self):
         """ ``{address: customer}``: the customer's own address, and its contacts'. """
@@ -354,12 +331,12 @@ class GameCustomer(models.Model):
         if float_compare(qty, order.qty, precision_digits=digits) > 0:
             return self.env._(
                 "We asked for %(asked)s %(product)s, not %(invoiced)s.",
-                asked=_qty(order.qty), product=product.display_name, invoiced=_qty(qty),
+                asked=utils.quantity(order.qty), product=product.display_name, invoiced=utils.quantity(qty),
             )
         if currency.compare_amounts(invoice.amount_total, qty * order.max_price) > 0:
             return self.env._(
                 "%(amount)s for %(qty)s %(product)s is more than we pay: %(price)s each at most, taxes included.",
-                amount=format_amount(self.env, invoice.amount_total, currency), qty=_qty(qty),
+                amount=format_amount(self.env, invoice.amount_total, currency), qty=utils.quantity(qty),
                 product=product.display_name, price=format_amount(self.env, order.max_price, currency),
             )
         return None
@@ -405,14 +382,12 @@ class GameCustomerOrder(models.Model):
         help="The email the customer ordered with. Its complaints follow it up.")
     invoice_ids = fields.One2many('game.customer.invoice', 'order_id', "Invoices received")
     package_ids = fields.One2many('game.package', 'order_id', "Packages received")
-    # Shipped straight to the customer, before goods went by post (1.2).
-    entry_ids = fields.One2many('game.stock.entry', 'customer_order_id', "Ledger")
 
     def _compute_display_name(self):
         for order in self:
             order.display_name = self.env._(
                 "%(customer)s: %(qty)s %(product)s",
-                customer=order.partner_id.display_name, qty=_qty(order.qty), product=order.product_id.display_name,
+                customer=order.partner_id.display_name, qty=utils.quantity(order.qty), product=order.product_id.display_name,
             )
 
     def _complete(self, at):
@@ -430,7 +405,7 @@ class GameCustomerOrder(models.Model):
             order.write({'state': 'delivered', 'date_delivered': at, 'date_chase': False})
             customer = order.customer_id
             customer.next_order_date = at + timedelta(hours=customer.interval)
-            customer._trigger_orders(customer.next_order_date)
+            utils.trigger(self.env, 'odoo_sim.ir_cron_customer_orders', customer.next_order_date)
 
     def _complain(self):
         """ Paid, and still without its goods: the customer writes to ask for them, and waits again.
@@ -445,7 +420,7 @@ class GameCustomerOrder(models.Model):
             paid = order.invoice_ids.filtered(lambda received: received.state == 'paid')[:1]
             values = {
                 'amount': format_amount(self.env, order.amount_paid, order.currency_id),
-                'qty': _qty(order.qty_paid),
+                'qty': utils.quantity(order.qty_paid),
                 'product': order.product_id.display_name,
                 'reference': paid.reference or paid.name or '',
             }
@@ -456,7 +431,7 @@ class GameCustomerOrder(models.Model):
             else:
                 text = self.env._(
                     "We paid %(amount)s for %(qty)s %(product)s (%(reference)s), and have received only %(received)s.",
-                    received=_qty(order.qty_received), **values)
+                    received=utils.quantity(order.qty_received), **values)
             customer._write_to_company(
                 self.env._("Where are our %(qty)s %(product)s?", qty=values['qty'], product=values['product']),
                 Markup("<p>%s</p><p>%s</p>%s<p>%s</p>") % (
@@ -568,4 +543,4 @@ class GameEmailDelivery(models.Model):
         """ Mail has reached mailboxes outside the company: some may be customers'. """
         super()._received()
         if self:
-            self.env['game.customer']._trigger_mail()
+            utils.trigger(self.env, 'odoo_sim.ir_cron_customer_mail')

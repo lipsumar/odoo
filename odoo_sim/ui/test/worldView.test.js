@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { describeWorld, moneyFormat } from '../src/worldView.js';
+import { moneyFormat } from '../src/formats.js';
+import { describeWorld } from '../src/worldView.js';
 
 const UTC = {
     number: new Intl.NumberFormat('en-GB', { maximumFractionDigits: 2 }),

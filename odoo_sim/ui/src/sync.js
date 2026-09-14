@@ -13,11 +13,11 @@
  */
 
 /**
- * Read a response from one of the world's endpoints, or throw an `Error`
+ * Read the JSON answer of one of the game's endpoints, or throw an `Error`
  * whose message is the server's reason -- a `UserError` arrives as a 422
  * whose body carries the sentence the player should see.
  */
-export async function readWorld(response) {
+export async function readJson(response) {
     let body = null;
     try {
         body = await response.json();
@@ -50,7 +50,7 @@ export function syncWorld({ load, onWorld }) {
 
     async function run(request) {
         const ticket = ++issued;
-        const world = await readWorld(await request());
+        const world = await readJson(await request());
         if (ticket > applied) {
             applied = ticket;
             onWorld(world);

@@ -10,21 +10,19 @@ Movements, not totals: the database under test may be a world someone has been
 playing in, where Odoo and the world already disagree (DESIGN.md 8).
 """
 from datetime import datetime, timedelta
-from unittest.mock import patch
 
 from odoo import Command, fields
-from odoo.addons.base.models.ir_mail_server import IrMail_Server
-from odoo.tests.common import TransactionCase
 
 from odoo.addons.odoo_sim.models.game_post import address_words
-from odoo.addons.odoo_sim.tests.test_employee import zone_at
+from odoo.addons.odoo_sim.tests.common import SimCase, sending, with_chart_of_accounts, zone_at
 
 
-class TestPaperclips(TransactionCase):
+class TestPaperclips(SimCase):
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        with_chart_of_accounts(cls.env)
         cls.wire = cls.env.ref('odoo_sim_paperclips.product_wire')
         cls.clip = cls.env.ref('odoo_sim_paperclips.product_paperclip')
         cls.vendor = cls.env.ref('odoo_sim_paperclips.vendor_wire')
@@ -165,8 +163,7 @@ class TestPaperclips(TransactionCase):
         sale.action_confirm()
         invoice = sale._create_invoices()
         invoice.action_post()
-        with patch.object(IrMail_Server, '_disable_send', return_value=False), \
-                patch('smtplib.SMTP', side_effect=AssertionError("SMTP")):
+        with sending():
             self.env['account.move.send.wizard'].with_context(
                 active_model='account.move', active_ids=invoice.ids,
             ).create({}).action_send_and_print()
@@ -222,8 +219,6 @@ class TestPaperclips(TransactionCase):
     def test_binder_and_co_can_be_found_at_the_address_odoo_has(self):
         """ The two halves agree at the start: the contact's address in Odoo is where the post finds it. """
         partner = self.customer.partner_id
-        if not partner.street:
-            self.skipTest("Binder & Co.'s contact predates its address: this world was upgraded into packages")
         written = self.env['game.employee']._address_on(partner)
         self.assertEqual(written, "Binder & Co.\n12 Clip Lane\nSpringfield OR 97477\nUnited States",
                          "what a worker writes on a box")
